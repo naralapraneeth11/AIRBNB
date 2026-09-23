@@ -1,0 +1,329 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+model Workspace {
+  id String @id @default(cuid())
+  name String
+  nextRunAt DateTime @default(now())
+  createdAt DateTime @default(now())
+}
+model User {
+  id String @id @default(cuid())
+  emailHash String @unique
+  emailEncrypted String
+  name String
+  passwordHash String
+  disabled Boolean @default(false)
+  createdAt DateTime @default(now())
+}
+model Membership {
+  id String @id @default(cuid())
+  workspaceId String
+  userId String
+  role String @default("COHOST")
+  @@unique([workspaceId,userId])
+  @@index([userId])
+}
+model Session {
+  id String @id @default(cuid())
+  tokenHash String @unique
+  userId String
+  workspaceId String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([expiresAt])
+}
+model RateLimit {
+  key String @id
+  count Int @default(0)
+  expiresAt DateTime
+}
+model Listing {
+  id String @id @default(cuid())
+  workspaceId String
+  name String
+  address String
+  timezone String @default("America/Los_Angeles")
+  color String @default("#a8c9b8")
+  currency String @default("USD")
+  doorCodeEncrypted String?
+  houseManualEncrypted String
+  bufferDays Int @default(1)
+  checkoutHour Int @default(11)
+  cleaningBufferHours Int @default(4)
+  photoIds String[] @default([])
+  ready Boolean @default(false)
+  exportTokenHash String @unique
+  archivedAt DateTime?
+  version Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([workspaceId,id])
+}
+model SyncSource {
+  id String @id @default(cuid())
+  workspaceId String
+  listingId String
+  platform String
+  urlEncrypted String
+  direction String @default("IMPORT")
+  tokenHash String @unique
+  lastSyncedAt DateTime?
+  lastAttemptAt DateTime?
+  nextPollAt DateTime @default(now())
+  status String @default("PENDING")
+  error String?
+  etag String?
+  lastModified String?
+  failures Int @default(0)
+  leaseUntil DateTime?
+  leaseToken String?
+  enabled Boolean @default(true)
+  createdAt DateTime @default(now())
+  @@unique([workspaceId,id])
+  @@unique([workspaceId,listingId,platform,direction])
+  @@index([workspaceId,nextPollAt])
+}
+model SyncRun {
+  id String @id @default(cuid())
+  workspaceId String
+  sourceId String
+  success Boolean
+  durationMs Int
+  events Int @default(0)
+  error String?
+  createdAt DateTime @default(now())
+  @@index([workspaceId,createdAt])
+}
+model Booking {
+  id String @id @default(cuid())
+  workspaceId String
+  listingId String
+  sourceId String?
+  externalUid String
+  guestNameEncrypted String?
+  guestContactEncrypted String?
+  guestHash String?
+  startDate DateTime @db.Date
+  endDate DateTime @db.Date
+  platform String
+  status String @default("CONFIRMED")
+  kind String @default("RESERVATION")
+  reason String?
+  price Decimal? @db.Decimal(12,2)
+  currency String @default("USD")
+  confirmedAt DateTime
+  observedAt DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  missingCount Int @default(0)
+  priorityOverride Boolean @default(false)
+  conflictWithId String?
+  version Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([workspaceId,id])
+  @@unique([workspaceId,listingId,platform,externalUid])
+  @@index([workspaceId,listingId,startDate,endDate])
+  @@index([workspaceId,status])
+}
+model Cleaner {
+  id String @id @default(cuid())
+  workspaceId String
+  name String
+  phoneEncrypted String
+  listingIds String[] @default([])
+  enabled Boolean @default(true)
+  createdAt DateTime @default(now())
+  @@unique([workspaceId,id])
+}
+model CleaningTask {
+  id String @id @default(cuid())
+  workspaceId String
+  listingId String
+  bookingId String?
+  cleanerId String?
+  title String @default("Guest-ready turnover")
+  status String @default("NEEDS_SCHEDULING")
+  scheduledAt DateTime
+  acceptBy DateTime?
+  verifyBy DateTime
+  acceptedAt DateTime?
+  startedAt DateTime?
+  completedAt DateTime?
+  verifiedAt DateTime?
+  photoId String?
+  codeReleasedAt DateTime?
+  noteEncrypted String?
+  version Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([workspaceId,id])
+  @@unique([workspaceId,bookingId])
+  @@index([workspaceId,status,scheduledAt])
+}
+model MagicLink {
+  id String @id @default(cuid())
+  workspaceId String
+  taskId String
+  cleanerId String
+  tokenHash String @unique
+  expiresAt DateTime
+  redeemedAt DateTime?
+  revokedAt DateTime?
+  sessionHash String? @unique
+  createdAt DateTime @default(now())
+  @@index([workspaceId,taskId])
+}
+model Asset {
+  id String @id @default(cuid())
+  workspaceId String
+  taskId String?
+  listingId String?
+  storageKey String @unique
+  mime String
+  bytes Int
+  sha256 String
+  createdAt DateTime @default(now())
+  @@unique([workspaceId,id])
+}
+model Thread {
+  id String @id @default(cuid())
+  workspaceId String
+  listingId String
+  bookingId String
+  externalId String
+  platform String
+  status String @default("NEEDS_REPLY")
+  intent String @default("QUESTION")
+  manual Boolean @default(false)
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+  @@unique([workspaceId,id])
+  @@unique([workspaceId,platform,externalId])
+}
+model Message {
+  id String @id @default(cuid())
+  workspaceId String
+  threadId String
+  externalId String?
+  bodyEncrypted String
+  sender String
+  status String @default("RECEIVED")
+  automated Boolean @default(false)
+  aiConfidence Float?
+  ruleId String?
+  replyToId String?
+  explanation String?
+  sentAt DateTime?
+  createdAt DateTime @default(now())
+  @@unique([workspaceId,id])
+  @@unique([workspaceId,threadId,externalId])
+  @@index([workspaceId,threadId,createdAt])
+}
+model AutomationSettings {
+  workspaceId String @id
+  paused Boolean @default(true)
+  cleaning Boolean @default(false)
+  messaging Boolean @default(false)
+  ai Boolean @default(false)
+  confidence Float @default(0.98)
+  version Int @default(0)
+  updatedAt DateTime @updatedAt
+}
+model AutomationRule {
+  id String @id @default(cuid())
+  workspaceId String
+  listingId String?
+  name String
+  trigger String @default("GUEST_MESSAGE")
+  keywords String[]
+  manualField String?
+  templateEncrypted String
+  action String @default("DRAFT")
+  enabled Boolean @default(true)
+  priority Int @default(100)
+  version Int @default(0)
+  createdAt DateTime @default(now())
+  @@unique([workspaceId,id])
+}
+model DomainEvent {
+  id String @id @default(cuid())
+  workspaceId String
+  type String
+  entityId String
+  payload Json
+  key String
+  createdAt DateTime @default(now())
+  @@unique([workspaceId,key])
+  @@index([workspaceId,entityId,createdAt])
+}
+model Outbox {
+  id String @id @default(cuid())
+  workspaceId String
+  kind String
+  entityId String
+  key String
+  payloadEncrypted String
+  status String @default("PENDING")
+  automated Boolean @default(true)
+  category String
+  attempts Int @default(0)
+  dueAt DateTime @default(now())
+  leaseUntil DateTime?
+  leaseToken String?
+  providerId String?
+  error String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([workspaceId,key])
+  @@index([workspaceId,status,dueAt])
+}
+model AuditLog {
+  id String @id @default(cuid())
+  workspaceId String
+  actorId String
+  action String
+  entity String
+  entityId String?
+  reason String
+  detailEncrypted String?
+  requestId String?
+  createdAt DateTime @default(now())
+  @@index([workspaceId,createdAt])
+  @@index([workspaceId,entityId])
+}
+model Notification {
+  id String @id @default(cuid())
+  workspaceId String
+  key String
+  title String
+  body String
+  href String
+  readAt DateTime?
+  createdAt DateTime @default(now())
+  @@unique([workspaceId,key])
+  @@index([workspaceId,createdAt])
+}
+model PushSubscription {
+  id String @id @default(cuid())
+  workspaceId String
+  userId String
+  endpointHash String @unique
+  subscriptionEncrypted String
+  createdAt DateTime @default(now())
+}
+model Integration {
+  id String @id @default(cuid())
+  workspaceId String
+  platform String
+  endpointEncrypted String
+  secretEncrypted String
+  enabled Boolean @default(true)
+  createdAt DateTime @default(now())
+  @@unique([workspaceId,platform])
+}
