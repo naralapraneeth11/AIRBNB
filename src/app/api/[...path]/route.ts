@@ -1,24 +1,8 @@
-import { handleApi } from "@/server/router";
-
+import { handle } from "@/server/router";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-export async function GET(request: Request) {
-  return handleApi(request);
-}
-
-export async function POST(request: Request) {
-  return handleApi(request);
-}
-
-export async function PUT(request: Request) {
-  return handleApi(request);
-}
-
-export async function PATCH(request: Request) {
-  return handleApi(request);
-}
-
-export async function DELETE(request: Request) {
-  return handleApi(request);
-}
+export const maxDuration = 60;
+export const GET = handle;
+export const POST = handle;
+export const PATCH = handle;
+export const DELETE = handle;
