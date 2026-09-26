@@ -1,0 +1,20 @@
+# Secrets — never commit these
+.env
+.env.*
+!.env.example
+
+# Dependencies and build output
+node_modules/
+.next/
+out/
+tsconfig.tsbuildinfo
+next-env.d.ts
+
+# Vercel / Cloudflare local state
+.vercel/
+.wrangler/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.log
