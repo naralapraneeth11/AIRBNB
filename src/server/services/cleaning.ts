@@ -1,82 +1,260 @@
-import type { Booking, Listing } from "@prisma/client";
+import { randomUUID } from "node:crypto";
+import type { CleaningTask, Listing, Reservation } from "@prisma/client";
 import { type Context, type Tx, lock } from "../db";
 import { audit, event, enqueue, notify } from "../audit";
 import { canTransition, checkoutInstant } from "@/lib/domain";
-import { randomToken, hash, decrypt, encrypt } from "../crypto";
+import { randomToken, hash, decrypt } from "../crypto";
 import { ensure } from "../errors";
 import { appUrl } from "../config";
-export async function createTurnover(
+import {
+  planTurnover,
+  stayExpected,
+  type TurnoverTask,
+} from "@/domain/cleaning/turnover";
+import type { BlockState, Lifecycle } from "@/domain/calendar/types";
+
+const CLOSED = ["CANCELLED", "SUPERSEDED"];
+const toDate = (d: Date) => d.toISOString().slice(0, 10);
+
+/**
+ * CLEAN 01/03: bring a reservation's turnover work in line with the stay.
+ * Runs inside the calendar commit transaction, in LIVE mode only.
+ */
+export async function applyTurnover(
   tx: Tx,
   ctx: Context,
-  b: Booking,
-  l: Listing,
+  listing: Listing,
+  reservation: Reservation,
+  block: BlockState,
+  now: Date,
 ) {
-  if (b.kind !== "RESERVATION" || b.status !== "CONFIRMED") return;
-  const settings = await tx.automationSettings.findUnique({
-    where: { workspaceId: ctx.workspaceId },
+  const tasks = await tx.cleaningTask.findMany({
+    where: { workspaceId: ctx.workspaceId, reservationId: reservation.id },
   });
-  if (!settings?.cleaning || settings.paused) return;
-  const scheduledAt = checkoutInstant(b.endDate, l.checkoutHour, l.timezone);
-  if (scheduledAt.getTime() < Date.now() - 30 * 86400000) return;
-  const prior = await tx.cleaningTask.findUnique({
-    where: {
-      workspaceId_bookingId: { workspaceId: ctx.workspaceId, bookingId: b.id },
+  const ops = planTurnover(
+    {
+      id: reservation.id,
+      status: reservation.status as "CONFIRMED" | "CANCELLED" | "RECLASSIFIED",
+      blockLifecycle: block.lifecycle,
+      departureDate: toDate(reservation.endDate),
     },
-  });
-  const task = await tx.cleaningTask.upsert({
-    where: {
-      workspaceId_bookingId: { workspaceId: ctx.workspaceId, bookingId: b.id },
-    },
-    create: {
-      workspaceId: ctx.workspaceId,
-      listingId: l.id,
-      bookingId: b.id,
-      scheduledAt,
-      verifyBy: new Date(
-        scheduledAt.getTime() + l.cleaningBufferHours * 3600000,
-      ),
-    },
-    update: {},
-  });
-  if (
-    !["DONE", "VERIFIED"].includes(task.status) &&
-    task.scheduledAt.getTime() !== scheduledAt.getTime()
-  ) {
-    await tx.cleaningTask.update({
-      where: { id: task.id },
-      data: {
-        scheduledAt,
-        verifyBy: new Date(
-          scheduledAt.getTime() + l.cleaningBufferHours * 3600000,
-        ),
-        version: { increment: 1 },
-      },
-    });
-    await notify(
-      tx,
-      ctx,
-      `cleaning-rescheduled:${task.id}:${b.version}`,
-      "Turnover timing changed",
-      `${l.name}: review the updated checkout time and cleaner assignment.`,
-      "/cleaning",
-    );
+    tasks.map<TurnoverTask>((t) => ({
+      id: t.id,
+      departureDate: t.departureDate ? toDate(t.departureDate) : null,
+      status: t.status as TurnoverTask["status"],
+      reviewRequired: t.reviewRequired,
+      reviewReason: t.reviewReason,
+    })),
+  );
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  for (const op of ops) {
+    if (op.type === "CREATE") {
+      const scheduledAt = checkoutInstant(
+        reservation.endDate,
+        listing.checkoutHour,
+        listing.timezone,
+      );
+      if (scheduledAt.getTime() < now.getTime() - 30 * 86_400_000) continue;
+      const task = await tx.cleaningTask.create({
+        data: {
+          id: randomUUID(),
+          workspaceId: ctx.workspaceId,
+          listingId: listing.id,
+          reservationId: reservation.id,
+          taskType: "TURNOVER",
+          departureDate: reservation.endDate,
+          supersedesTaskId: op.supersedesTaskId,
+          scheduledAt,
+          verifyBy: new Date(
+            scheduledAt.getTime() + listing.cleaningBufferHours * 3_600_000,
+          ),
+        },
+      });
+      await event(tx, ctx, "CLEANING_CREATED", task.id, `task:${task.id}`, {
+        reservationId: reservation.id,
+        listingId: listing.id,
+        supersedes: op.supersedesTaskId,
+      });
+      await audit(
+        tx,
+        ctx,
+        "AUTOMATION",
+        "CleaningTask",
+        task.id,
+        op.supersedesTaskId
+          ? "The stay's dates changed; a replacement turnover was created and the previous one superseded."
+          : "A confirmed reservation requires a turnover at local checkout time.",
+        {
+          reservationId: reservation.id,
+          scheduledAt: scheduledAt.toISOString(),
+        },
+      );
+      continue;
+    }
+    const task = byId.get(op.taskId)!;
+    if (op.type === "SUPERSEDE" || op.type === "CANCEL") {
+      const status = op.type === "SUPERSEDE" ? "SUPERSEDED" : "CANCELLED";
+      const written = await tx.cleaningTask.updateMany({
+        where: { id: task.id, version: task.version },
+        data: {
+          status,
+          closedAt: now,
+          closeReason: op.reason,
+          reviewRequired: false,
+          reviewReason: null,
+          codeReleasedAt: null,
+          version: { increment: 1 },
+        },
+      });
+      if (!written.count) continue;
+      // The cleaner keeps their link so they see a clear cancelled or changed
+      // screen; queued invitations stop and door codes stay withheld.
+      await tx.outbox.updateMany({
+        where: {
+          workspaceId: ctx.workspaceId,
+          entityId: task.id,
+          kind: "CLEANER_SMS",
+          status: "PENDING",
+        },
+        data: { status: "CANCELLED" },
+      });
+      if (task.cleanerId && ["ASSIGNED", "ACCEPTED"].includes(task.status))
+        await enqueue(
+          tx,
+          ctx,
+          "CLEANER_NOTICE",
+          task.id,
+          `notice:${task.id}:${status}`,
+          {
+            cleanerId: task.cleanerId,
+            text:
+              status === "SUPERSEDED"
+                ? "A cleaning job assigned to you changed. Your host will send the updated job; please do not start the old one."
+                : "A cleaning job assigned to you was cancelled. Please do not go to the property for it.",
+          },
+          "CLEANING",
+        );
+      await event(
+        tx,
+        ctx,
+        `CLEANING_${status}`,
+        task.id,
+        `transition:${task.id}:${status}`,
+        { from: task.status, to: status, reason: op.reason },
+      );
+      await audit(
+        tx,
+        ctx,
+        "TRANSITION",
+        "CleaningTask",
+        task.id,
+        `${task.status} → ${status}: ${op.reason}.`,
+        { reservationId: reservation.id },
+      );
+      await notify(
+        tx,
+        ctx,
+        `cleaning-${status.toLowerCase()}:${task.id}`,
+        status === "SUPERSEDED"
+          ? "A turnover moved with its stay"
+          : "A turnover was cancelled",
+        task.cleanerId
+          ? `${listing.name}: the assigned cleaner is notified when cleaning automation is on; otherwise let them know yourself.`
+          : `${listing.name}: no cleaner was assigned.`,
+        "/cleaning",
+      );
+    } else if (op.type === "FLAG_REVIEW") {
+      const written = await tx.cleaningTask.updateMany({
+        where: { id: task.id, version: task.version },
+        data: {
+          reviewRequired: true,
+          reviewReason: op.reason,
+          version: { increment: 1 },
+        },
+      });
+      if (written.count)
+        await notify(
+          tx,
+          ctx,
+          `cleaning-review:${task.id}:${op.reason}`,
+          "A turnover needs your review",
+          `${listing.name}: the stay changed or is under review. Door-code access is withheld until you decide.`,
+          "/cleaning",
+        );
+    } else if (op.type === "CLEAR_REVIEW")
+      await tx.cleaningTask.updateMany({
+        where: { id: task.id, version: task.version },
+        data: {
+          reviewRequired: false,
+          reviewReason: null,
+          version: { increment: 1 },
+        },
+      });
   }
-  await event(tx, ctx, "CLEANING_CREATED", task.id, "task:" + b.id, {
-    bookingId: b.id,
-    listingId: l.id,
+  // Keep the current, not-yet-started turnover on the property's checkout time.
+  const current = await tx.cleaningTask.findFirst({
+    where: {
+      workspaceId: ctx.workspaceId,
+      reservationId: reservation.id,
+      departureDate: reservation.endDate,
+      status: { in: ["NEEDS_SCHEDULING", "ASSIGNED", "ACCEPTED"] },
+    },
   });
-  if (!prior)
-    await audit(
-      tx,
-      ctx,
-      "AUTOMATION",
-      "CleaningTask",
-      task.id,
-      "A confirmed reservation requires a turnover at local checkout time.",
-      { bookingId: b.id, scheduledAt: scheduledAt.toISOString() },
+  if (current) {
+    const scheduledAt = checkoutInstant(
+      reservation.endDate,
+      listing.checkoutHour,
+      listing.timezone,
     );
-  return task;
+    if (current.scheduledAt.getTime() !== scheduledAt.getTime()) {
+      await tx.cleaningTask.update({
+        where: { id: current.id },
+        data: {
+          scheduledAt,
+          verifyBy: new Date(
+            scheduledAt.getTime() + listing.cleaningBufferHours * 3_600_000,
+          ),
+          version: { increment: 1 },
+        },
+      });
+      await notify(
+        tx,
+        ctx,
+        `cleaning-rescheduled:${current.id}:${scheduledAt.toISOString()}`,
+        "Turnover timing changed",
+        `${listing.name}: review the updated checkout time and cleaner assignment.`,
+        "/cleaning",
+      );
+    }
+  }
 }
+
+/** Whether a task's stay is still expected; tasks without a stay always are. */
+export async function turnoverStanding(
+  tx: Tx,
+  ctx: Context,
+  task: CleaningTask,
+) {
+  if (CLOSED.includes(task.status)) return { expected: false, closed: true };
+  if (!task.reservationId) return { expected: true, closed: false };
+  const reservation = await tx.reservation.findFirst({
+    where: { workspaceId: ctx.workspaceId, id: task.reservationId },
+  });
+  const block = reservation?.blockId
+    ? await tx.availabilityBlock.findFirst({
+        where: { workspaceId: ctx.workspaceId, id: reservation.blockId },
+        select: { lifecycle: true },
+      })
+    : null;
+  const expected =
+    !!reservation &&
+    stayExpected({
+      status: reservation.status as "CONFIRMED" | "CANCELLED" | "RECLASSIFIED",
+      blockLifecycle: (block?.lifecycle ?? "ACTIVE") as Lifecycle,
+    });
+  return { expected, closed: false };
+}
+
 export async function assignTask(
   tx: Tx,
   ctx: Context,
@@ -89,17 +267,19 @@ export async function assignTask(
     where: { id: taskId, workspaceId: ctx.workspaceId },
   });
   ensure(task, 404, "NOT_FOUND", "Task not found.");
-  if (task.bookingId) {
-    const booking = await tx.booking.findFirst({
-      where: { id: task.bookingId, workspaceId: ctx.workspaceId },
-    });
-    ensure(
-      booking?.status === "CONFIRMED",
-      409,
-      "BOOKING_REVIEW",
-      "Resolve the reservation before assigning or progressing its turnover.",
-    );
-  }
+  const standing = await turnoverStanding(tx, ctx, task);
+  ensure(
+    !standing.closed,
+    409,
+    "TASK_CLOSED",
+    "This turnover was cancelled or replaced.",
+  );
+  ensure(
+    standing.expected && !task.reviewRequired,
+    409,
+    "BOOKING_REVIEW",
+    "Resolve the reservation before assigning or progressing its turnover.",
+  );
   ensure(
     task.version === version,
     409,
@@ -212,17 +392,22 @@ export async function transitionTask(
     where: { id: taskId, workspaceId: ctx.workspaceId },
   });
   ensure(task, 404, "NOT_FOUND", "Task not found.");
-  if (task.bookingId) {
-    const booking = await tx.booking.findFirst({
-      where: { id: task.bookingId, workspaceId: ctx.workspaceId },
-    });
+  const standing = await turnoverStanding(tx, ctx, task);
+  ensure(
+    !standing.closed,
+    409,
+    "TASK_CLOSED",
+    "This turnover was cancelled or replaced.",
+  );
+  // Verifying finished work stays possible so evidence can be reconciled;
+  // every other step needs a stay that is still expected (CLEAN 03).
+  if (next !== "VERIFIED" && !(next === "DONE" && task.status === "VERIFIED"))
     ensure(
-      booking?.status === "CONFIRMED",
+      standing.expected && !task.reviewRequired,
       409,
       "BOOKING_REVIEW",
       "Resolve the reservation before assigning or progressing its turnover.",
     );
-  }
   if (ctx.role === "CLEANER")
     ensure(
       task.id === ctx.taskId && task.cleanerId === ctx.cleanerId,
@@ -294,7 +479,7 @@ export async function transitionTask(
         listingId: task.listingId,
         id: { not: taskId },
         scheduledAt: { lte: now },
-        status: { not: "VERIFIED" },
+        status: { notIn: ["VERIFIED", ...CLOSED] },
       },
     });
     await tx.listing.update({
@@ -325,6 +510,14 @@ export async function transitionTask(
   );
   return updated;
 }
+
+const NOTICES: Record<string, string> = {
+  CANCELLED: "This job was cancelled. Please do not go to the property for it.",
+  SUPERSEDED: "This job changed. Your host will send the updated job.",
+  REVIEW:
+    "Your host is reviewing this stay. Door-code access is paused until they decide.",
+};
+
 export async function cleanerJob(tx: Tx, ctx: Context) {
   const task = await tx.cleaningTask.findFirst({
     where: {
@@ -337,11 +530,7 @@ export async function cleanerJob(tx: Tx, ctx: Context) {
   const listing = await tx.listing.findUniqueOrThrow({
     where: { id: task.listingId },
   });
-  const booking = task.bookingId
-    ? await tx.booking.findFirst({
-        where: { id: task.bookingId, workspaceId: ctx.workspaceId },
-      })
-    : null;
+  const standing = await turnoverStanding(tx, ctx, task);
   await audit(
     tx,
     ctx,
@@ -350,6 +539,8 @@ export async function cleanerJob(tx: Tx, ctx: Context) {
     task.id,
     "Cleaner viewed their assigned job; guest contacts and pricing are excluded.",
   );
+  const underReview =
+    !standing.closed && (!standing.expected || task.reviewRequired);
   return {
     id: task.id,
     title: task.title,
@@ -358,8 +549,16 @@ export async function cleanerJob(tx: Tx, ctx: Context) {
     verifyBy: task.verifyBy,
     version: task.version,
     photoId: task.photoId,
+    closed: standing.closed,
+    reviewRequired: underReview,
+    notice: standing.closed
+      ? NOTICES[task.status]
+      : underReview
+        ? NOTICES.REVIEW
+        : null,
     codeAvailable:
-      (!task.bookingId || booking?.status === "CONFIRMED") &&
+      standing.expected &&
+      !task.reviewRequired &&
       !!task.codeReleasedAt &&
       ["ACCEPTED", "IN_PROGRESS", "DONE"].includes(task.status),
     listing: {
@@ -413,12 +612,6 @@ export async function cleanerJobs(tx: Tx, ctx: Context) {
       day: "2-digit",
     });
     if (day.format(task.scheduledAt) !== day.format(now)) continue;
-    if (task.bookingId) {
-      const booking = await tx.booking.findFirst({
-        where: { workspaceId: ctx.workspaceId, id: task.bookingId },
-      });
-      if (booking?.status !== "CONFIRMED") continue;
-    }
     jobs.push(await cleanerJob(tx, { ...ctx, taskId: task.id }));
   }
   await audit(

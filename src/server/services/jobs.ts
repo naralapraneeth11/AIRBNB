@@ -1,4 +1,12 @@
-import { db, tenant, lock, type Context } from "../db";
+import { randomUUID } from "node:crypto";
+import {
+  db,
+  tenant,
+  lock,
+  ensureDatabaseSafety,
+  type Context,
+  type Tx,
+} from "../db";
 import { audit, notify } from "../audit";
 import { randomToken, unseal, decrypt } from "../crypto";
 import {
@@ -8,11 +16,36 @@ import {
   sendPush,
 } from "../integrations/providers";
 import { evaluateMessage } from "./messaging";
-import { pollSource } from "./calendar";
-import { createTurnover } from "./cleaning";
+import { turnoverStanding } from "./cleaning";
 import { isSensitive, dateOnly } from "@/lib/domain";
 import { ensure } from "../errors";
+import { reportError } from "../observability";
+import { platformBudget } from "@/domain/calendar/schedule";
+import { todayIn } from "@/domain/calendar/dates";
+import type { Platform } from "@/domain/calendar/types";
+import { runConnection } from "../calendar/run";
+import {
+  calendarMode,
+  loadPropertyBlocks,
+  publishExports,
+} from "../calendar/commit";
+import { fromLocalDate, toLocalDate } from "../calendar/mappers";
 import type webpush from "web-push";
+
+/** A tick must finish inside the platform's 60 second function limit. */
+export const TICK_BUDGET_MS = 48_000;
+/** Longer than any tick, so an overlapping clock call skips instead of racing. */
+const TICK_LEASE_MS = 58_000;
+const WORKSPACE_BUDGET_MS = 15_000;
+const CONNECTIONS_PER_WORKSPACE = 10;
+const CONCURRENCY = 3;
+/** Bounded retention for high-volume operational evidence. */
+export const RETENTION = {
+  observationsDays: 30,
+  retrievalsDays: 14,
+  ticksDays: 14,
+} as const;
+
 export async function dispatch(ctx: Context, id: string) {
   const lease = randomToken();
   const job = await tenant(ctx, async (tx) => {
@@ -80,27 +113,20 @@ export async function dispatch(ctx: Context, id: string) {
           else throw error;
         }
       }
-    } else if (job.kind === "CLEANER_SMS") {
+    } else if (job.kind === "CLEANER_SMS" || job.kind === "CLEANER_NOTICE") {
       const payload = unseal<{
         cleanerId: string;
-        taskVersion: number;
-        to: string;
+        taskVersion?: number;
+        to?: string;
         text: string;
       }>(job.payloadEncrypted, ctx.workspaceId);
-      const allowed = await tenant(ctx, async (tx) => {
+      const recipient = await tenant(ctx, async (tx) => {
         const settings = await tx.automationSettings.findUniqueOrThrow({
           where: { workspaceId: ctx.workspaceId },
         });
         const task = await tx.cleaningTask.findFirst({
           where: { id: job.entityId, workspaceId: ctx.workspaceId },
         });
-        if (
-          !task ||
-          task.cleanerId !== payload.cleanerId ||
-          task.version !== payload.taskVersion ||
-          task.status !== "ASSIGNED"
-        )
-          return false;
         const cleaner = await tx.cleaner.findFirst({
           where: {
             id: payload.cleanerId,
@@ -108,20 +134,25 @@ export async function dispatch(ctx: Context, id: string) {
             enabled: true,
           },
         });
-        const booking = task.bookingId
-          ? await tx.booking.findFirst({
-              where: { id: task.bookingId, workspaceId: ctx.workspaceId },
-            })
-          : null;
-        return (
-          !settings.paused &&
-          settings.cleaning &&
-          !!cleaner &&
+        if (!task || !cleaner || settings.paused || !settings.cleaning)
+          return null;
+        if (job.kind === "CLEANER_NOTICE")
+          // A cancellation or change notice goes to the cleaner who held the job.
+          return task.cleanerId === payload.cleanerId &&
+            ["CANCELLED", "SUPERSEDED"].includes(task.status)
+            ? decrypt(cleaner.phoneEncrypted, ctx.workspaceId)
+            : null;
+        const standing = await turnoverStanding(tx, ctx, task);
+        return task.cleanerId === payload.cleanerId &&
+          task.version === payload.taskVersion &&
+          task.status === "ASSIGNED" &&
           cleaner.listingIds.includes(task.listingId) &&
-          (!task.bookingId || booking?.status === "CONFIRMED")
-        );
+          standing.expected &&
+          !task.reviewRequired
+          ? (payload.to ?? null)
+          : null;
       });
-      if (!allowed) {
+      if (!recipient) {
         await tenant(ctx, (tx) =>
           tx.outbox.update({
             where: { id },
@@ -130,7 +161,7 @@ export async function dispatch(ctx: Context, id: string) {
         );
         return;
       }
-      providerId = await sendSMS(payload.to, payload.text);
+      providerId = await sendSMS(recipient, payload.text);
     } else if (job.kind === "GUEST_MESSAGE") {
       const data = await tenant(ctx, async (tx) => {
         const m = await tx.message.findUniqueOrThrow({
@@ -139,8 +170,8 @@ export async function dispatch(ctx: Context, id: string) {
           thread = await tx.thread.findUniqueOrThrow({
             where: { id: m.threadId },
           }),
-          booking = await tx.booking.findUniqueOrThrow({
-            where: { id: thread.bookingId },
+          reservation = await tx.reservation.findUniqueOrThrow({
+            where: { id: thread.reservationId },
           }),
           settings = await tx.automationSettings.findUniqueOrThrow({
             where: { workspaceId: ctx.workspaceId },
@@ -210,12 +241,15 @@ export async function dispatch(ctx: Context, id: string) {
           m.id,
           "Message content and recipient shared with the configured delivery provider.",
         );
-        return { m, thread, booking, integration, body };
+        return { m, thread, reservation, integration, body };
       });
       if (!data) return;
-      const { thread, booking, integration, body } = data;
+      const { thread, reservation, integration, body } = data;
       if (thread.platform === "DIRECT") {
-        const contact = decrypt(booking.guestContactEncrypted, ctx.workspaceId);
+        const contact = decrypt(
+          reservation.guestContactEncrypted,
+          ctx.workspaceId,
+        );
         ensure(
           /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact),
           422,
@@ -316,26 +350,11 @@ export async function dispatch(ctx: Context, id: string) {
     });
   }
 }
-export async function drainWorkspace(workspaceId: string, budgetMs = 40000) {
+
+/** Outbox work only: used after requests and by the tick (AUTO 03). */
+export async function dispatchOutbox(workspaceId: string, budgetMs = 20000) {
   const ctx: Context = { workspaceId, actorId: "worker", role: "SYSTEM" };
   const started = Date.now();
-  const sources = await tenant(ctx, (tx) =>
-    tx.syncSource.findMany({
-      where: {
-        workspaceId,
-        enabled: true,
-        direction: "IMPORT",
-        nextPollAt: { lte: new Date() },
-      },
-      take: 20,
-      orderBy: { nextPollAt: "asc" },
-      select: { id: true },
-    }),
-  );
-  for (let i = 0; i < sources.length && Date.now() - started < budgetMs; i += 3)
-    await Promise.allSettled(
-      sources.slice(i, i + 3).map((s) => pollSource(ctx, s.id)),
-    );
   await tenant(ctx, async (tx) => {
     const abandoned = await tx.outbox.findMany({
       where: { workspaceId, status: "SENDING", leaseUntil: { lt: new Date() } },
@@ -361,13 +380,140 @@ export async function drainWorkspace(workspaceId: string, budgetMs = 40000) {
         "/activity",
       );
     }
-    const now = new Date();
+  });
+  // Each job is attempted at most once per drain, so a job that stays pending
+  // (a gate closed, another worker holds it) cannot spin the loop.
+  const attempted: string[] = [];
+  while (Date.now() - started < budgetMs) {
+    const jobs = await tenant(ctx, async (tx) => {
+      const settings = await tx.automationSettings.findUniqueOrThrow({
+        where: { workspaceId },
+      });
+      return tx.outbox.findMany({
+        where: {
+          workspaceId,
+          status: "PENDING",
+          dueAt: { lte: new Date() },
+          id: { notIn: attempted },
+          OR: [
+            { automated: false },
+            { category: { in: automatedCategories(settings) } },
+          ],
+        },
+        orderBy: { createdAt: "asc" },
+        take: 4,
+        select: { id: true },
+      });
+    });
+    if (!jobs.length) break;
+    attempted.push(...jobs.map((j) => j.id));
+    await Promise.allSettled(jobs.map((j) => dispatch(ctx, j.id)));
+  }
+  return { dispatched: attempted.length };
+}
+
+const automatedCategories = (s: {
+  paused: boolean;
+  cleaning: boolean;
+  messaging: boolean;
+}) =>
+  s.paused
+    ? []
+    : [
+        ...(s.cleaning ? ["CLEANING"] : []),
+        ...(s.messaging ? ["MESSAGING"] : []),
+      ];
+
+type TickStats = {
+  workspaces: number;
+  claimed: number;
+  completed: number;
+  failed: number;
+  retries: number;
+  dispatched: number;
+  backlog: number;
+  oldestDueAt: Date | null;
+  oldestOutboxDueAt: Date | null;
+};
+
+const earliest = (a: Date | null, b: Date | null) =>
+  !a ? b : !b ? a : a < b ? a : b;
+const DAY_MS = 86_400_000;
+const system = (workspaceId: string): Context => ({
+  workspaceId,
+  actorId: "worker",
+  role: "SYSTEM",
+});
+
+/**
+ * Stage 1 for one workspace: run its due calendar checks under the tick's
+ * shared platform budgets. Claiming and fencing happen inside runConnection.
+ */
+async function runDueConnections(
+  workspaceId: string,
+  deadline: number,
+  budget: ReturnType<typeof platformBudget>,
+  stats: TickStats,
+) {
+  const ctx = system(workspaceId);
+  const now = new Date();
+  const due = await tenant(ctx, (tx) =>
+    tx.channelConnection.findMany({
+      where: {
+        workspaceId,
+        enabled: true,
+        importUrlEncrypted: { not: null },
+        nextFetchAt: { lte: now },
+        OR: [{ leaseUntil: null }, { leaseUntil: { lt: now } }],
+      },
+      orderBy: { nextFetchAt: "asc" },
+      take: CONNECTIONS_PER_WORKSPACE * 2,
+      select: { id: true, platform: true },
+    }),
+  );
+  const selected = due
+    .filter((c) => budget.take(c.platform as Platform))
+    .slice(0, CONNECTIONS_PER_WORKSPACE);
+  for (
+    let i = 0;
+    i < selected.length && Date.now() < deadline;
+    i += CONCURRENCY
+  ) {
+    const results = await Promise.allSettled(
+      selected
+        .slice(i, i + CONCURRENCY)
+        .map((c) => runConnection(ctx, c.id, { trigger: "SCHEDULED" })),
+    );
+    for (const r of results) {
+      if (r.status === "rejected") {
+        stats.failed++;
+        reportError(r.reason, "scheduler-run");
+        continue;
+      }
+      // Null: another worker holds the lease or the connection changed.
+      if (!r.value) continue;
+      stats.claimed++;
+      if (r.value.retry) stats.retries++;
+      if (r.value.outcome === "BODY" || r.value.outcome === "NOT_MODIFIED")
+        stats.completed++;
+      else if (r.value.outcome === "FAILED") stats.failed++;
+    }
+  }
+}
+
+/** Cleaning deadlines and stale calendars: alerts that need no feed to be due. */
+async function alertOverdue(workspaceId: string, now: Date) {
+  const ctx = system(workspaceId);
+  await tenant(ctx, async (tx) => {
     const tasks = await tx.cleaningTask.findMany({
       where: {
         workspaceId,
         OR: [
           { status: "ASSIGNED", acceptBy: { lt: now } },
-          { status: { not: "VERIFIED" }, verifyBy: { lt: now } },
+          {
+            status: { notIn: ["VERIFIED", "CANCELLED", "SUPERSEDED"] },
+            verifyBy: { lt: now },
+          },
         ],
       },
       take: 100,
@@ -383,98 +529,280 @@ export async function drainWorkspace(workspaceId: string, budgetMs = 40000) {
           : "Checkout plus the cleaning buffer has passed without photo verification.",
         "/cleaning",
       );
-    const stale = await tx.syncSource.findMany({
+    // REL 01: shadow mode raises no calendar alerts.
+    if ((await calendarMode(tx, ctx)) !== "LIVE") return;
+    const staleBefore = new Date(
+      now.getTime() - (Number(process.env.SYNC_STALE_MINUTES) || 240) * 60000,
+    );
+    const stale = await tx.channelConnection.findMany({
       where: {
         workspaceId,
         enabled: true,
-        lastSyncedAt: {
-          lt: new Date(
-            Date.now() -
-              (Number(process.env.SYNC_STALE_MINUTES) || 240) * 60000,
-          ),
-        },
-      },
-    });
-    for (const s of stale)
-      await notify(
-        tx,
-        ctx,
-        `stale:${s.id}:${dateOnly(now)}`,
-        "Calendar data is stale",
-        "Dates remain protected, but the feed needs attention before new availability is trusted.",
-        "/calendar",
-      );
-    const bookings = await tx.booking.findMany({
-      where: {
-        workspaceId,
-        status: "CONFIRMED",
-        kind: "RESERVATION",
-        endDate: {
-          gte: new Date(Date.now() - 86400000),
-          lte: new Date(Date.now() + 90 * 86400000),
-        },
+        importUrlEncrypted: { not: null },
+        createdAt: { lt: staleBefore },
+        OR: [{ lastSuccessAt: null }, { lastSuccessAt: { lt: staleBefore } }],
       },
       take: 100,
     });
-    for (const b of bookings) {
-      const l = await tx.listing.findUniqueOrThrow({
-        where: { id: b.listingId },
-      });
-      await createTurnover(tx, ctx, b, l);
-    }
+    for (const c of stale)
+      await notify(
+        tx,
+        ctx,
+        `stale:${c.id}:${dateOnly(now)}`,
+        "Calendar data is stale",
+        "Dates remain protected, but this calendar has not been checked successfully for a while.",
+        "/properties?connection=" + c.id,
+      );
   });
-  while (Date.now() - started < budgetMs) {
-    const jobs = await tenant(ctx, async (tx) => {
-      const settings = await tx.automationSettings.findUniqueOrThrow({
-        where: { workspaceId },
+}
+
+/**
+ * EXPORT 01: an export changes by the passage of time alone when its oldest
+ * event leaves the history window. Each listing records that date, so this
+ * republishes once on the day it arrives instead of recomputing every tick.
+ */
+async function refreshAgedExports(
+  workspaceId: string,
+  now: Date,
+  deadline: number,
+) {
+  const ctx = system(workspaceId);
+  // No time zone is ahead of UTC+14, so no property's date is later than this.
+  const latestDate = toLocalDate(new Date(now.getTime() + 14 * 3_600_000));
+  const due = await tenant(ctx, (tx) =>
+    tx.listing.findMany({
+      where: {
+        workspaceId,
+        archivedAt: null,
+        exportRefreshOn: { lte: fromLocalDate(latestDate) },
+      },
+      select: { id: true, timezone: true, exportRefreshOn: true },
+      take: 50,
+    }),
+  );
+  for (const l of due) {
+    if (Date.now() > deadline) return;
+    if (toLocalDate(l.exportRefreshOn!) > todayIn(l.timezone, now.getTime()))
+      continue;
+    await tenant(ctx, async (tx) => {
+      await lock(tx, "listing:" + l.id);
+      const listing = await tx.listing.findUniqueOrThrow({
+        where: { id: l.id },
       });
-      return tx.outbox.findMany({
-        where: {
-          workspaceId,
-          status: "PENDING",
-          dueAt: { lte: new Date() },
-          OR: [
-            { automated: false },
-            ...(!settings.paused
-              ? [
-                  {
-                    category: {
-                      in: [
-                        ...(settings.cleaning ? ["CLEANING"] : []),
-                        ...(settings.messaging ? ["MESSAGING"] : []),
-                      ],
-                    },
-                  },
-                ]
-              : []),
-          ],
-        },
-        orderBy: { createdAt: "asc" },
-        take: 4,
-        select: { id: true },
-      });
+      await publishExports(
+        tx,
+        ctx,
+        listing,
+        await loadPropertyBlocks(tx, ctx, listing.id),
+        now,
+      );
     });
-    if (!jobs.length) break;
-    await Promise.allSettled(jobs.map((j) => dispatch(ctx, j.id)));
-    break;
   }
 }
-export async function runCron() {
-  const started = Date.now();
-  const workspaces = await db.workspace.findMany({
-    orderBy: { nextRunAt: "asc" },
-  });
-  for (const w of workspaces) {
-    if (Date.now() - started > 48000) break;
-    await db.workspace.update({
-      where: { id: w.id },
-      data: { nextRunAt: new Date(Date.now() + 60000) },
+
+/** Bounded retention for high-volume operational evidence (DATA 03). */
+async function pruneEvidence(workspaceId: string, now: Date) {
+  await tenant(system(workspaceId), async (tx) => {
+    await tx.feedObservation.deleteMany({
+      where: {
+        workspaceId,
+        observedAt: {
+          lt: new Date(now.getTime() - RETENTION.observationsDays * DAY_MS),
+        },
+        // Comparison snapshots (the latest two accepted per connection) and
+        // each connection's newest observation stay, however old.
+        snapshotEncrypted: null,
+        id: { notIn: await latestObservationIds(tx, workspaceId) },
+      },
     });
-    await drainWorkspace(w.id, Math.min(15000, 48000 - (Date.now() - started)));
-  }
-  await db.rateLimit.deleteMany({
-    where: { expiresAt: { lt: new Date(Date.now() - 86400000) } },
+    await tx.exportRetrieval.deleteMany({
+      where: {
+        workspaceId,
+        lastAt: {
+          lt: new Date(now.getTime() - RETENTION.retrievalsDays * DAY_MS),
+        },
+      },
+    });
+    await tx.revokedExportToken.deleteMany({
+      where: { workspaceId, expiresAt: { lt: now } },
+    });
   });
-  await db.session.deleteMany({ where: { expiresAt: { lt: new Date() } } });
-  return { durationMs: Date.now() - started };
+}
+
+async function latestObservationIds(tx: Tx, workspaceId: string) {
+  const rows = await tx.channelConnection.findMany({
+    where: { workspaceId, lastObservationId: { not: null } },
+    select: { lastObservationId: true },
+  });
+  return rows.map((r) => r.lastObservationId!);
+}
+
+/** Remaining due work and the oldest actionable items (OPS 01 progress). */
+async function measureBacklog(workspaceId: string, stats: TickStats) {
+  await tenant(system(workspaceId), async (tx) => {
+    const now = new Date();
+    const dueWhere = {
+      workspaceId,
+      enabled: true,
+      importUrlEncrypted: { not: null },
+      nextFetchAt: { lte: now },
+    };
+    stats.backlog += await tx.channelConnection.count({ where: dueWhere });
+    const oldest = await tx.channelConnection.findFirst({
+      where: dueWhere,
+      orderBy: { nextFetchAt: "asc" },
+      select: { nextFetchAt: true },
+    });
+    stats.oldestDueAt = earliest(
+      stats.oldestDueAt,
+      oldest?.nextFetchAt ?? null,
+    );
+    const settings = await tx.automationSettings.findUnique({
+      where: { workspaceId },
+    });
+    const outboxWhere = {
+      workspaceId,
+      status: "PENDING",
+      dueAt: { lte: now },
+      OR: [
+        { automated: false },
+        {
+          category: {
+            in: settings ? automatedCategories(settings) : [],
+          },
+        },
+      ],
+    };
+    stats.backlog += await tx.outbox.count({ where: outboxWhere });
+    const outbox = await tx.outbox.findFirst({
+      where: outboxWhere,
+      orderBy: { dueAt: "asc" },
+      select: { dueAt: true },
+    });
+    stats.oldestOutboxDueAt = earliest(
+      stats.oldestOutboxDueAt,
+      outbox?.dueAt ?? null,
+    );
+  });
+}
+
+/**
+ * ARCH 03 / OPS 01: one authenticated scheduler tick. The scheduler holds no
+ * booking policy: it claims bounded durable work, records what advanced and
+ * what remains, and releases its lease. A 200 from the endpoint therefore
+ * never stands in for progress; the recorded tick does.
+ */
+export async function runTick(trigger: "CRON_HTTP" | "WORKER") {
+  await ensureDatabaseSafety();
+  const id = randomUUID();
+  const startedAt = new Date();
+  const holder = randomToken();
+  const leased = await db.$executeRaw`
+    UPDATE "SchedulerLease"
+       SET "holder" = ${holder},
+           "leaseUntil" = ${new Date(startedAt.getTime() + TICK_LEASE_MS)}
+     WHERE "id" = 'scheduler'
+       AND ("leaseUntil" IS NULL OR "leaseUntil" < ${startedAt})`;
+  if (!leased) {
+    // The clock still fired: a heartbeat, but no claim on work.
+    await db.schedulerTick.create({
+      data: {
+        id,
+        trigger,
+        status: "SKIPPED_OVERLAP",
+        startedAt,
+        completedAt: startedAt,
+        durationMs: 0,
+      },
+    });
+    return { id, status: "SKIPPED_OVERLAP" as const, durationMs: 0 };
+  }
+  await db.schedulerTick.create({
+    data: { id, trigger, status: "RUNNING", startedAt },
+  });
+  const stats: TickStats = {
+    workspaces: 0,
+    claimed: 0,
+    completed: 0,
+    failed: 0,
+    retries: 0,
+    dispatched: 0,
+    backlog: 0,
+    oldestDueAt: null,
+    oldestOutboxDueAt: null,
+  };
+  let status: "COMPLETED" | "FAILED" = "COMPLETED";
+  let errorCode: string | null = null;
+  try {
+    const deadline = startedAt.getTime() + TICK_BUDGET_MS;
+    const budget = platformBudget();
+    // Least recently served first, so a noisy workspace cannot starve others.
+    const workspaces = await db.workspace.findMany({
+      orderBy: { nextRunAt: "asc" },
+      select: { id: true },
+    });
+    for (const w of workspaces) {
+      if (Date.now() > deadline) break;
+      stats.workspaces++;
+      await db.workspace.update({
+        where: { id: w.id },
+        data: { nextRunAt: new Date(Date.now() + 60000) },
+      });
+      const workspaceDeadline = Math.min(
+        deadline,
+        Date.now() + WORKSPACE_BUDGET_MS,
+      );
+      try {
+        await runDueConnections(w.id, workspaceDeadline, budget, stats);
+        stats.dispatched += (
+          await dispatchOutbox(
+            w.id,
+            Math.max(0, workspaceDeadline - Date.now()),
+          )
+        ).dispatched;
+        const now = new Date();
+        await alertOverdue(w.id, now);
+        await refreshAgedExports(w.id, now, workspaceDeadline);
+        await pruneEvidence(w.id, now);
+      } catch (error) {
+        stats.failed++;
+        reportError(error, "scheduler-workspace");
+      }
+    }
+    for (const w of workspaces) await measureBacklog(w.id, stats);
+    await db.rateLimit.deleteMany({
+      where: { expiresAt: { lt: new Date(Date.now() - DAY_MS) } },
+    });
+    await db.session.deleteMany({ where: { expiresAt: { lt: new Date() } } });
+    await db.schedulerTick.deleteMany({
+      where: {
+        startedAt: { lt: new Date(Date.now() - RETENTION.ticksDays * DAY_MS) },
+      },
+    });
+  } catch (error) {
+    status = "FAILED";
+    errorCode = error instanceof Error ? error.name : "Unknown";
+    reportError(error, "scheduler-tick");
+  } finally {
+    const completedAt = new Date();
+    await db.schedulerTick.update({
+      where: { id },
+      data: {
+        status,
+        completedAt,
+        durationMs: completedAt.getTime() - startedAt.getTime(),
+        errorCode,
+        ...stats,
+      },
+    });
+    await db.$executeRaw`
+      UPDATE "SchedulerLease" SET "holder" = NULL, "leaseUntil" = NULL
+       WHERE "id" = 'scheduler' AND "holder" = ${holder}`;
+  }
+  return {
+    id,
+    status,
+    durationMs: Date.now() - startedAt.getTime(),
+    ...stats,
+  };
 }

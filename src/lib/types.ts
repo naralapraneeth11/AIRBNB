@@ -160,7 +160,6 @@ export type Insights = {
   responseSamples: number;
   cleaningHours: number | null;
   cleaningSamples: number;
-  syncSampleCapped: boolean;
 };
 export type AuditEntry = {
   id: string;

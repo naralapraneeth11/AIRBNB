@@ -35,6 +35,9 @@ export const blockInput = z
     to: date,
     reason: z.string().trim().min(1).max(200),
     idempotencyKey: z.uuid(),
+    holdType: z.enum(["OWNER", "MAINTENANCE"]).default("OWNER"),
+    /** MANUAL 01: overlaps are previewed; creating anyway is explicit. */
+    acknowledgeOverlaps: z.boolean().default(false),
   })
   .refine((x) => x.to > x.from, "End date must be after start date")
   .refine(
@@ -81,6 +84,7 @@ export const directBookingInput = z
     price: z.number().nonnegative().max(999999999).nullable(),
     currency: z.string().regex(/^[A-Z]{3}$/),
     idempotencyKey: z.uuid(),
+    acknowledgeOverlaps: z.boolean().default(false),
   })
   .refine((x) => x.to > x.from, "Checkout must be after check-in")
   .refine(

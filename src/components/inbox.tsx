@@ -1,21 +1,13 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import {
-  Send,
-  Info,
-  Check,
-  X,
-  PenLine,
-  MessageSquare,
-  ShieldCheck,
-} from "lucide-react";
+import { Send, Info, Check, X, PenLine, MessageSquare } from "lucide-react";
 import { useWorkspace } from "./workspace";
 import { api, label, dateTime } from "@/lib/client";
 import type { Thread, Conversation, Message } from "@/lib/types";
-import { Head, Button, Badge, Empty, Toggle, ErrorBox, Field } from "./ui";
+import { Head, Button, Badge, Empty, Toggle, ErrorBox } from "./ui";
 export function InboxView() {
-  const { data, show, close, toast, explain, refresh } = useWorkspace(),
+  const { data, toast, explain } = useWorkspace(),
     params = useSearchParams();
   const [threads, setThreads] = useState<Thread[]>([]),
     [selected, setSelected] = useState(params.get("thread") || ""),

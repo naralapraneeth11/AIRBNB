@@ -9,7 +9,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { api, label, dateTime, APIError } from "@/lib/client";
-import { Button, Badge, ErrorBox, Empty, Field } from "./ui";
+import { Button, Badge, ErrorBox, Empty } from "./ui";
 type Job = {
   id: string;
   title: string;

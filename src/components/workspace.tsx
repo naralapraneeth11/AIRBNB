@@ -5,7 +5,6 @@ import {
   useEffect,
   useState,
   useCallback,
-  useRef,
   type ReactNode,
 } from "react";
 import Link from "next/link";
@@ -23,19 +22,14 @@ import {
   Bell,
   Menu,
   ArrowRight,
-  Command,
   ShieldCheck,
   ChevronsLeft,
-  Plus,
-  Power,
   Check,
-  X,
-  LayoutDashboard,
 } from "lucide-react";
 import { api, label, dateTime } from "@/lib/client";
 import type { WorkspaceData, AuditEntry } from "@/lib/types";
 import type { Command as Intent } from "@/lib/domain";
-import { Modal, Button, Head, Badge, ErrorBox, Skeleton, Empty } from "./ui";
+import { Modal, Button, Badge, ErrorBox, Skeleton, Empty } from "./ui";
 import { CalendarView, BlockForm } from "./calendar";
 import { InboxView } from "./inbox";
 import { CleaningView } from "./cleaning";
@@ -74,7 +68,6 @@ const navigation = [
   ["insights", "Insights", ChartNoAxesCombined],
 ] as const;
 export function Workspace({ section }: { section: string }) {
-  const router = useRouter();
   const [data, setData] = useState<WorkspaceData | null>(null),
     [error, setError] = useState(""),
     [dialog, setDialog] = useState<{
@@ -403,7 +396,7 @@ export function Workspace({ section }: { section: string }) {
   );
 }
 function Palette() {
-  const { data, show, close } = useWorkspace(),
+  const { show, close } = useWorkspace(),
     router = useRouter();
   const [query, setQuery] = useState(""),
     [busy, setBusy] = useState(false),
@@ -494,7 +487,7 @@ function Palette() {
     </div>
   );
 }
-export function MutationForm({
+export function MutationForm<T = unknown>({
   children,
   path,
   method = "POST",
@@ -506,7 +499,7 @@ export function MutationForm({
   path: string;
   method?: string;
   build: (data: FormData) => unknown;
-  onSaved?: (result: any) => void;
+  onSaved?: (result: T) => void;
   label?: string;
 }) {
   const { mutate, close, toast } = useWorkspace();
@@ -520,7 +513,11 @@ export function MutationForm({
         setBusy(true);
         setError("");
         try {
-          const result = await mutate(path, build(new FormData(form)), method);
+          const result = await mutate<T>(
+            path,
+            build(new FormData(form)),
+            method,
+          );
           toast("Changes saved.");
           if (onSaved) onSaved(result);
           else close();

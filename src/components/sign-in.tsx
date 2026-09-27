@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import Link from "next/link";
 import { ArrowRight, ShieldCheck, CalendarDays, Workflow } from "lucide-react";
 import { api } from "@/lib/client";
 import { Button, Field, ErrorBox } from "./ui";
@@ -9,12 +10,12 @@ export function SignIn({ configured }: { configured: boolean }) {
   return (
     <main id="main" className="login">
       <section className="login-story">
-        <a className="brand" href="/">
+        <Link className="brand" href="/">
           <span className="brand-mark">a</span>
           <span>
             airbnb <small>AUTOMATION</small>
           </span>
-        </a>
+        </Link>
         <div>
           <span className="eyebrow">
             A LITTLE LESS WORK. A LOT MORE CLARITY.

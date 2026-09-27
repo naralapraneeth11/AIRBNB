@@ -10,6 +10,11 @@ import {
 import { required } from "./config";
 export const randomToken = () => randomBytes(32).toString("base64url");
 export const hash = (s: string) => createHash("sha256").update(s).digest("hex");
+/** Keyed digest of an exact value (no case folding), e.g. a secret feed URL. */
+export const keyedDigest = (purpose: string, value: string) =>
+  createHmac("sha256", required("AUTH_SECRET"))
+    .update(purpose + "\u0000" + value)
+    .digest("hex");
 export const blind = (s: string) =>
   createHmac("sha256", required("AUTH_SECRET"))
     .update(s.trim().toLowerCase())

@@ -24,14 +24,10 @@ import {
   Power,
   MessageSquare,
   ClipboardCheck,
-  SlidersHorizontal,
   Sparkles,
-  Check,
   Download,
   Users,
   Bell,
-  Sun,
-  Moon,
   ChevronRight,
   PenLine,
   RefreshCw,
@@ -142,7 +138,7 @@ function ListingForm({ listing: l }: { listing?: Listing }) {
   const { show } = useWorkspace();
   const empty = { wifi: "", checkin: "", parking: "", washroom: "", rules: "" };
   return (
-    <MutationForm
+    <MutationForm<Listing & { exportUrl?: string }>
       path={l ? "listings/" + l.id : "listings"}
       method={l ? "PATCH" : "POST"}
       label={l ? "Save property" : "Create property"}
@@ -437,7 +433,7 @@ function ListingDetail({ listing: initial }: { listing: Listing }) {
             onClick={() =>
               show(
                 "Rotate the master feed URL",
-                <MutationForm
+                <MutationForm<{ url: string }>
                   path={"listings/" + l.id + "/export-token"}
                   build={() => ({})}
                   label="Rotate feed URL"
@@ -525,7 +521,7 @@ function ListingDetail({ listing: initial }: { listing: Listing }) {
 function SourceForm({ listing }: { listing: Listing }) {
   const { show } = useWorkspace();
   return (
-    <MutationForm
+    <MutationForm<{ exportUrl: string }>
       path="sources"
       label="Connect calendar"
       onSaved={(r) =>
@@ -882,7 +878,7 @@ function RuleForm({ rule: r }: { rule?: Rule }) {
   );
 }
 export function InsightsView() {
-  const { data, toast } = useWorkspace();
+  const { toast } = useWorkspace();
   const [from, setFrom] = useState(localDate(dayAdd(new Date(), -30))),
     [to, setTo] = useState(localDate(dayAdd(new Date(), 1))),
     [stats, setStats] = useState<Insights | null>(null),
@@ -1097,11 +1093,9 @@ export function InsightsView() {
           </p>
         )}
         <p className="panel-footnote">
-          Uptime measures successful import polls, not the speed of a platform
-          refreshing its imported calendar.
-          {stats?.syncSampleCapped
-            ? " Based on the latest 20,000 observations."
-            : ""}
+          The share of calendar checks that produced a usable result. It does
+          not measure how quickly a platform refreshes its copy of your
+          calendar.
         </p>
       </section>
     </>
@@ -1385,7 +1379,7 @@ function IntegrationForm() {
   );
 }
 function Team() {
-  const { data, show, toast } = useWorkspace();
+  const { data, show } = useWorkspace();
   const [members, setMembers] = useState<
       { id: string; userId: string; name: string; role: string }[]
     >([]),

@@ -1,16 +1,10 @@
 import { cookies } from "next/headers";
-import { db, tenant, lock, type Context } from "./db";
-import {
-  hash,
-  blind,
-  passwordMatches,
-  randomToken,
-  encrypt,
-  decrypt,
-} from "./crypto";
+import { db, tenant, lock, ensureDatabaseSafety, type Context } from "./db";
+import { hash, blind, passwordMatches, randomToken } from "./crypto";
 import { appUrl, cookieOptions } from "./config";
-import { AppError, ensure } from "./errors";
+import { ensure } from "./errors";
 import { audit } from "./audit";
+import { turnoverStanding } from "./services/cleaning";
 export async function rateLimit(key: string, limit = 60, seconds = 60) {
   const now = new Date();
   const row = await db.$transaction(async (tx) => {
@@ -35,6 +29,7 @@ export function checkOrigin(request: Request) {
 export async function currentContext(): Promise<Context | null> {
   const token = (await cookies()).get("str_session")?.value;
   if (!token) return null;
+  await ensureDatabaseSafety();
   const session = await db.session.findUnique({
     where: { tokenHash: hash(token) },
   });
@@ -258,17 +253,13 @@ export async function selectCleanerTask(ctx: Context, taskId: string) {
       "NOT_FOUND",
       "No active job is assigned to you with that identifier.",
     );
-    if (task.bookingId) {
-      const booking = await tx.booking.findFirst({
-        where: { workspaceId: ctx.workspaceId, id: task.bookingId },
-      });
-      ensure(
-        booking?.status === "CONFIRMED",
-        409,
-        "BOOKING_REVIEW",
-        "Your host needs to review this reservation before you can continue.",
-      );
-    }
+    const standing = await turnoverStanding(tx, ctx, task);
+    ensure(
+      standing.expected && !task.reviewRequired,
+      409,
+      "BOOKING_REVIEW",
+      "Your host needs to review this reservation before you can continue.",
+    );
     await tx.magicLink.create({
       data: {
         workspaceId: ctx.workspaceId,

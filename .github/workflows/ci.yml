@@ -1,0 +1,92 @@
+# QA 03: every pull request runs the same gates a contributor runs locally.
+# A step that cannot run fails the workflow; nothing is skipped silently.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Typecheck, lint, tests, build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hostsphere_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+      # Superuser URL for the disposable CI database. The integration harness
+      # rebuilds the schema, applies the shipped migrations, and connects the
+      # application through a NOSUPERUSER NOBYPASSRLS runtime role.
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hostsphere_test
+      REQUIRE_INTEGRATION_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm (version from package.json packageManager)
+        uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm db:generate
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Format
+        run: pnpm format:check
+
+      - name: Unit, domain, fixture and property tests
+        run: pnpm test
+
+      - name: Database integration tests (real PostgreSQL, RLS enforced)
+        run: pnpm test:integration
+
+      - name: Production build
+        run: pnpm build
+
+  dependency-audit:
+    name: Dependency audit (high and critical)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Exceptions live in pnpm-workspace.yaml (auditConfig) with a reason each.
+      - run: pnpm audit:deps

@@ -12,9 +12,9 @@ import {
 } from "lucide-react";
 import { useWorkspace, MutationForm } from "./workspace";
 import { cleaningStates } from "@/lib/domain";
-import { api, label, dateTime } from "@/lib/client";
+import { label, dateTime } from "@/lib/client";
 import type { Task } from "@/lib/types";
-import { Head, Button, Badge, Empty, Field, ErrorBox } from "./ui";
+import { Head, Button, Empty, Field } from "./ui";
 export function CleaningView() {
   const { data, show } = useWorkspace();
   const [filter, setFilter] = useState("all");
