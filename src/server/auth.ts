@@ -87,11 +87,16 @@ export async function login(email: string, password: string) {
     orderBy: { id: "asc" },
   });
   ensure(membership, 403, "NO_WORKSPACE", "No workspace access is available.");
+  await startSession(user.id, membership.workspaceId);
+  return { name: user.name };
+}
+/** A 12-hour server-backed session in an HTTP-only cookie. */
+export async function startSession(userId: string, workspaceId: string) {
   const token = randomToken();
   await db.session.create({
     data: {
-      userId: user.id,
-      workspaceId: membership.workspaceId,
+      userId,
+      workspaceId,
       tokenHash: hash(token),
       expiresAt: new Date(Date.now() + 12 * 3600000),
     },
@@ -100,7 +105,6 @@ export async function login(email: string, password: string) {
     ...cookieOptions(),
     maxAge: 12 * 3600,
   });
-  return { name: user.name };
 }
 export async function logout() {
   const jar = await cookies(),

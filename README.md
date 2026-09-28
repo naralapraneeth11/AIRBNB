@@ -50,6 +50,8 @@ Built with Next.js App Router, TypeScript, Prisma, and PostgreSQL. The interface
 
 7. Open `http://localhost:3000`, sign in, add a property, fill in its structured manual, and connect its calendars. Answer each connection's policy question on the calendar. The workspace starts in calendar **shadow mode**: decisions are recorded but export links, calendar alerts and turnover changes wait until you go live after the shadow review ([Deployment §8](docs/DEPLOYMENT.md#8-calendar-go-live)). Then import each connection's export link into its platform.
 
+With `SIGNUP_ENABLED=true` and email configured, new hosts can instead create their own account at `/signup`; they confirm their email and land in a guided setup.
+
 The owner bootstrap creates an empty workspace and editable FAQ rules in **draft** mode. All automation starts **paused**, each automation category starts disabled, and AI confidence starts at **98%**. Enable categories deliberately after validating them against your own accounts and data.
 
 ## Included workflows
@@ -70,6 +72,8 @@ Provider credentials are server-side environment variables. The settings screen'
 
 | Capability                    | Configuration                                                                                                                                     |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Account emails and sign-up    | `RESEND_API_KEY`, verified `EMAIL_FROM` for password reset; `SIGNUP_ENABLED=true` also opens self-service sign-up                                 |
+| Product name                  | `NEXT_PUBLIC_BRAND_NAME` (default "Airbnb Automation"); redeploy after changing it                                                                |
 | Calendar imports              | Platform links are checked against built-in domain rules; `ICAL_ALLOWED_HOSTS` optionally restricts Google and other calendars; `FETCHER_CONTACT` |
 | Scheduler and monitoring      | An external clock sending `CRON_SECRET` (see [`ops/clock`](ops/clock/README.md)); monitors sending `MONITOR_SECRET`                               |
 | Cleaner SMS                   | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`                                                                                   |

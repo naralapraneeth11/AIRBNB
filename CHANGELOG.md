@@ -4,7 +4,52 @@ Notable changes, newest first. Requirement identifiers refer to the Hostsphere
 Product and Engineering Specification v1.1. Gate evidence lives in
 [docs/RELEASE_GATES.md](docs/RELEASE_GATES.md).
 
-## Unreleased: Phase 0 Foundation and Phase 1 Calendar correctness
+## Unreleased: self-service accounts, guided setup and fixes
+
+### Before you upgrade
+
+- **Migration.** Apply `202609280001_accounts` (`pnpm db:migrate`) and
+  re-run `prisma/grants/runtime-role.sql`. It only adds tables, so running
+  it before or after deploying the code is safe: until it runs, sign-up,
+  password reset and guided setup are unavailable and everything else keeps
+  working.
+- **Email (optional).** With `RESEND_API_KEY` and `EMAIL_FROM` (a verified
+  domain), "Forgot your password?" works. Public sign-up also needs
+  `SIGNUP_ENABLED=true`; leave it unset for a supervised demo.
+- **Product name (optional).** `NEXT_PUBLIC_BRAND_NAME` sets the visible
+  name; redeploy after changing it. The default is unchanged.
+
+### Added
+
+- Self-service sign-up with email verification: the account and its
+  workspace are created only when the emailed link is used (AUTH 01).
+- Password reset by email: single-use 30-minute links; a reset signs out
+  every session (AUTH 03).
+- A password policy of at least 14 characters with no composition rules,
+  screened against known breaches through a privacy-preserving range
+  query; it also applies to changing a password.
+- Guided setup that saves progress after every step: property, calendar,
+  export link, optional cleaner, and a rehearsal of the first actions
+  (AUTH 04).
+- The product name as one setting, including the calendar fetcher's user
+  agent, pending decision D11.
+- An Inbox note that platform messages need an approved messaging service.
+
+### Fixed
+
+- A save whose follow-up refresh failed was reported as failed, inviting a
+  retry of something already saved; a failed background refresh replaced
+  the workspace with an error screen. Both now show a "may be out of date"
+  notice instead.
+- A proxy timeout page surfaced as a JSON parse error; it is now explained,
+  including that a save may have completed.
+
+### Not yet
+
+- Owner two-factor sign-in (AUTH 02) and emailed team invitations
+  (AUTH 03) come next.
+
+## Phase 0 Foundation and Phase 1 Calendar correctness ([#1](https://github.com/naralapraneeth11/AIRBNB/pull/1))
 
 ### Before you upgrade
 

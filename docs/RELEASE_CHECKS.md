@@ -4,6 +4,34 @@ A check counts as passed only when it ran (QA 03). This file records runs, not
 intentions; gate status and remaining operator work are in
 [RELEASE_GATES.md](RELEASE_GATES.md).
 
+## Accounts, guided setup and fixes: September 28, 2026 (later)
+
+Run locally against the working tree of the commit that adds this entry (code
+as of `f152fa9`, plus documentation). Same environment as below.
+
+| Gate (CI order)                  | Result                                                                                                                                       |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm install --frozen-lockfile` | Passed                                                                                                                                       |
+| `pnpm typecheck`                 | Passed                                                                                                                                       |
+| `pnpm lint`                      | Passed: 0 errors; the same 19 warnings as the original sources, none new                                                                     |
+| `pnpm format:check`              | Passed                                                                                                                                       |
+| `pnpm test`                      | 97 passed, 0 failed, 0 skipped (adds password policy, breach screen, email and brand tests)                                                  |
+| `pnpm test:integration`          | 23 passed, 0 failed, 0 skipped (adds sign-up, reset and guided setup on PostgreSQL 16 through the runtime role)                              |
+| `pnpm build`                     | Passed                                                                                                                                       |
+| `pnpm test:browser`              | 14 passed, 0 failed, 0 skipped (adds sign-up, email link, setup, reset and sign-in; a failed refresh after a save; an unreadable error page) |
+| `pnpm audit:deps`                | Passed: only the recorded exception GHSA-ggr8-5vv4-36mx                                                                                      |
+
+The refresh check was confirmed to fail against the previous save handling
+(no "Saved" confirmation appeared) and to pass with the fix. The new screens
+were also reviewed by eye at desktop and phone widths, which led to two
+styling fixes (a dimmed current step, and a phone layout that pushed the
+form below the fold).
+
+Not verified here: real email delivery through Resend, the breach screen
+against the live Pwned Passwords service from this network (the checks run
+with it unreachable, which exercises the fail-open path), and the hosted
+deployment.
+
 ## Phase 0 and Phase 1: September 28, 2026
 
 Run locally against the working tree of the commit that adds this record: code

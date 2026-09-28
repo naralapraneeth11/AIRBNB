@@ -54,6 +54,49 @@ model RateLimit {
   expiresAt DateTime
 }
 
+/// AUTH 01: a sign-up waiting for its emailed link. No user, workspace or
+/// session exists until the link is used. Server-only, outside tenant RLS.
+model PendingRegistration {
+  id             String   @id @default(cuid())
+  emailHash      String   @unique
+  emailEncrypted String
+  name           String
+  workspaceName  String
+  passwordHash   String
+  tokenHash      String   @unique
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+
+  @@index([expiresAt])
+}
+
+/// AUTH 03: a password reset link, stored only as a hash; single use, 30 minutes.
+model PasswordReset {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+/// AUTH 04: guided setup progress, one row per workspace (tenant RLS).
+model OnboardingProgress {
+  workspaceId       String    @id
+  step              String    @default("PROPERTY")
+  completed         String[]  @default([])
+  skipped           String[]  @default([])
+  listingId         String?
+  connectionId      String?
+  /// The host's statement that they added the export link, kept apart from observed retrievals.
+  exportConfirmedAt DateTime?
+  completedAt       DateTime?
+  updatedAt         DateTime  @default(now()) @updatedAt
+}
+
 model Listing {
   id                   String    @id @default(cuid())
   workspaceId          String

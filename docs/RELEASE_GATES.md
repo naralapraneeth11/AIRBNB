@@ -63,6 +63,18 @@ no channel is advertised as verified (D03). The gate closes when an anonymized
 real export for each advertised platform passes `tests/fixtures.test.ts` and
 the shadow review below is adjudicated.
 
+## Phase 2 accounts (started)
+
+Not part of Appendix B; recorded here so the account work has the same
+evidence trail.
+
+| Requirement                                                                                  | Status      | Evidence                                                                                                                                                                                                                                                                                                                                                                                                                                        | Remaining                                                                                                                    |
+| -------------------------------------------------------------------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| AUTH 01: register, verify email, sign in, recover, create a workspace without a terminal     | Built       | Sign-up creates only a pending registration until the emailed link is used; neutral responses with a minimum response time; per-address and global rate limits in windows; 14-character minimum with a breach screen (`tests/accounts.test.ts`; `tests/integration/accounts.test.ts`; browser: "a visitor signs up and nothing exists until the emailed link is used", "the emailed link creates the account, signs in and opens guided setup") | Email provider configured per environment; `SIGNUP_ENABLED` is the owner's choice                                            |
+| AUTH 02: owner MFA before automation or door-code access in the public release               | Not started |                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Required before the public beta                                                                                              |
+| AUTH 03: reset tokens random, hashed, single use, 30 minutes; reset signs out other sessions | Built       | Integration: "a reset link works once, within 30 minutes, and signs out every session"; browser: "a reset link sets a new password and signs out the earlier session"                                                                                                                                                                                                                                                                           | Emailed team invitations (seven-day, bound to workspace, role and address) and owner revocation of invitations are not built |
+| AUTH 04: save progress after every step, resume, skip optional steps                         | Built       | Integration: "a new sign-up lands in setup; steps save, advance and stay in their workspace", "the calendar step shows counts, and the export link needs the host's own confirmation"; browser: "setup saves each step, allows skipping optional ones, and finishes"                                                                                                                                                                            | A structured check-in time and suggesting a time zone from the location (needs a geocoding service)                          |
+
 ## Records
 
 Fill these in as the work happens and link the evidence (an issue, a run URL,
@@ -188,8 +200,9 @@ QA 03 asks for tool availability and exceptions to be recorded.
   reason and revisit trigger in `pnpm-workspace.yaml`.
 - **Code scanning.** CodeQL runs at no cost because the repository is public.
   If visibility changes (D11), confirm the plan still includes code scanning.
-- **Branding.** Visible branding stays "Airbnb Automation" until the trademark
-  and domain search (D11); compatibility identifiers are unchanged.
+- **Branding.** The visible name is one setting, `NEXT_PUBLIC_BRAND_NAME`
+  (default "Airbnb Automation"), until the trademark and domain search
+  (D11). Compatibility identifiers never change with it.
 
 ## Decisions this work depends on
 
@@ -199,6 +212,6 @@ QA 03 asks for tool availability and exceptions to be recorded.
 | D03 | Supported launch channels          | No channel is verified yet (no real fixtures); nothing is advertised as verified.                                                                                                                               |
 | D06 | Hosting budget                     | Open. The external clock does not depend on the Vercel plan's cron cadence; commercial eligibility is still the owner's decision.                                                                               |
 | D09 | Recovery objective                 | Open. Nightly backups support the proposed 24-hour RPO; the 4-hour RTO needs a timed restore drill and owner acceptance.                                                                                        |
-| D11 | Brand and repository               | Open. No visibility, license or visible-branding change was made.                                                                                                                                               |
+| D11 | Brand and repository               | Open. No visibility or license change was made. The visible name is a setting with an unchanged default, so a decision needs no code change.                                                                    |
 | D13 | Default for single-label platforms | Implemented as recommended: ask the host per connection; no silent default.                                                                                                                                     |
 | D15 | Export UID format freeze           | Frozen in code: `<blockId>@airbnb-automation`, with `<blockId>-pre@airbnb-automation` and `<blockId>-post@airbnb-automation` for buffer days. It must not change once any platform has imported an export link. |

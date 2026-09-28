@@ -8,6 +8,7 @@ import {
   policyLabelName,
   suggestedPolicyMode,
 } from "../src/lib/calendar-copy";
+import { brandFrom } from "../src/lib/brand";
 import type { Connection } from "../src/lib/types";
 
 const NOW = Date.parse("2026-09-28T12:00:00Z");
@@ -131,4 +132,21 @@ test("the capability table is well formed (section 5)", () => {
       );
     }
   }
+});
+
+test("the product name is one setting; identifiers stay stable (REL 03)", () => {
+  const current = brandFrom(undefined);
+  assert.deepEqual(
+    [current.name, current.mark, current.wordmark, current.descriptor],
+    ["Airbnb Automation", "a", "airbnb", "AUTOMATION"],
+  );
+  assert.equal(current.token, "AirbnbAutomation");
+  const renamed = brandFrom("  Hostsphere ");
+  assert.deepEqual(
+    [renamed.name, renamed.mark, renamed.wordmark, renamed.descriptor],
+    ["Hostsphere", "h", "hostsphere", ""],
+  );
+  assert.equal(brandFrom("Stay & Co.").token, "StayCo");
+  assert.equal(brandFrom("!!!").token, "Calendar");
+  assert.equal(brandFrom("").name, "Airbnb Automation");
 });

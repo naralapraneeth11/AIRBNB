@@ -111,13 +111,15 @@ Expired leases return safe internal work to pending. External sends are marked U
 
 ### User loses a password
 
-Verify identity outside the app. In the controlled administrative environment, set `RECOVERY_EMAIL` and `RECOVERY_PASSWORD` (at least 14 characters), with the owner `DIRECT_URL`, then run:
+When email is configured, the user resets it themselves from "Forgot your password?" on the sign-in page. The link works once for 30 minutes, the new password must meet the policy, and every session is signed out.
+
+Without email, or if the user no longer controls the address, verify identity outside the app. In the controlled administrative environment, set `RECOVERY_EMAIL` and `RECOVERY_PASSWORD` (at least 14 characters), with the owner `DIRECT_URL`, then run:
 
 ```sh
 pnpm reset:password
 ```
 
-The script updates the password, revokes all sessions for the account, and appends a recovery audit in its workspaces. Remove the recovery variables immediately afterward. There is no self-service email recovery or multi-factor authentication in this release.
+The script updates the password, revokes all sessions for the account, and appends a recovery audit in its workspaces. Remove the recovery variables immediately afterward. There is no multi-factor authentication yet (AUTH 02).
 
 ## Backups and restore
 

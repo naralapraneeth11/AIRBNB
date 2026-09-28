@@ -270,6 +270,7 @@ export function CalendarView() {
           Hold dates
         </Button>
       </Head>
+      <SetupReminder />
       {data.workspace.calendarMode === "SHADOW" && (
         <p className="callout shadow-banner" role="note">
           <Eye size={16} aria-hidden="true" />
@@ -1227,6 +1228,42 @@ function KeepForm({ block: b }: { block: CalendarBlock }) {
       </p>
       <ReasonField />
     </ActionForm>
+  );
+}
+
+/**
+ * AUTH 04: return a host to unfinished guided setup. Workspaces that did not
+ * start from sign-up have no setup record and never see this; if setup
+ * cannot be read, nothing is shown.
+ */
+function SetupReminder() {
+  const [setup, setSetup] = useState<{
+    exists: boolean;
+    step: string;
+    completed: string[];
+    skipped: string[];
+  } | null>(null);
+  useEffect(() => {
+    let active = true;
+    api<typeof setup>("onboarding")
+      .then((s) => {
+        if (active) setSetup(s);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+  if (!setup?.exists || setup.step === "DONE") return null;
+  const handled = new Set([...setup.completed, ...setup.skipped]).size;
+  return (
+    <p className="callout shadow-banner" role="note">
+      <Info size={16} aria-hidden="true" />
+      <span>
+        <strong>Finish setting up.</strong> {handled} of 5 steps done; your
+        progress is saved. <Link href="/setup">Continue setup</Link>
+      </span>
+    </p>
   );
 }
 

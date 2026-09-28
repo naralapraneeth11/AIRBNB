@@ -958,7 +958,7 @@ function ConnectionDetail({ id }: { id: string }) {
     </div>
   );
 }
-function CopyValue({ value }: { value: string }) {
+export function CopyValue({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="copy-value">

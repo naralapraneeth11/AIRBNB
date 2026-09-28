@@ -9,6 +9,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { api, label, dateTime, APIError } from "@/lib/client";
+import { BRAND } from "@/lib/brand";
 import { Button, Badge, ErrorBox, Empty } from "./ui";
 type Job = {
   id: string;
@@ -89,9 +90,9 @@ export function CleanerPortal() {
   return (
     <main id="main" className="cleaner-portal">
       <header>
-        <span className="brand-mark">a</span>
+        <span className="brand-mark">{BRAND.mark}</span>
         <span>
-          airbnb <small>CLEANER WORKSPACE</small>
+          {BRAND.wordmark} <small>CLEANER WORKSPACE</small>
         </span>
       </header>
       {error && <ErrorBox message={error} />}

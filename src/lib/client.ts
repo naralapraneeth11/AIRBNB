@@ -28,7 +28,20 @@ export async function api<T>(
     signal: options.signal,
     cache: "no-store",
   });
-  const data = await response.json();
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    // A proxy timeout or platform error page is not JSON. Say so plainly:
+    // for a save, the server may still have completed it.
+    throw new APIError(
+      response.ok
+        ? "The server sent a response that could not be read."
+        : `The server did not answer properly (HTTP ${response.status}). If you were saving something, check whether it was saved before trying again.`,
+      response.status,
+      "UNREADABLE_RESPONSE",
+    );
+  }
   if (!response.ok) {
     if (
       response.status === 401 &&

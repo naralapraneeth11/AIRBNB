@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
+import { BRAND } from "@/lib/brand";
 import "./globals.css";
 export const metadata: Metadata = {
-  title: { default: "Airbnb Automation", template: "%s · Airbnb Automation" },
+  title: { default: BRAND.name, template: `%s · ${BRAND.name}` },
   description:
     "A clear, accountable workspace for short-term rental operations.",
   robots: { index: false, follow: false },

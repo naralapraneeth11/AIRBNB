@@ -20,6 +20,7 @@ export default async function Page({
       "insights",
       "settings",
       "activity",
+      "setup",
     ].includes(section)
   )
     notFound();
