@@ -36,10 +36,15 @@ export function connectionStatus(
   const last = c.lastSuccessAt
     ? `Checked the ${c.platformName} source ${ago(c.lastSuccessAt, now)}.`
     : "No successful check yet.";
+  const wait = Date.parse(c.nextFetchAt) - now;
   const next =
     c.health === "PAUSED_BY_SOURCE" && c.sourceRetryAfter
       ? ` The calendar asked us to wait; the next check is after ${dateTime(c.sourceRetryAfter)}.`
-      : ` Next check ${until(c.nextFetchAt, now)}.`;
+      : wait > 30_000
+        ? ` Next check ${until(c.nextFetchAt, now)}.`
+        : wait > -10 * 60_000
+          ? " The next check is due now."
+          : ` The next check is overdue; it was due ${ago(c.nextFetchAt, now)}.`;
   if (c.checking)
     return { tone: "muted", headline: "Checking now", detail: last };
   if (!c.lastResult)
@@ -105,6 +110,30 @@ export const FLAG_LABEL: Record<string, string> = {
   BEYOND_COVERAGE: "Outside the calendar's current range",
 };
 
+/** What each review flag means and what the host can do about it. */
+export const FLAG_EXPLANATION: Record<string, string> = {
+  IDENTITY_UNCERTAIN:
+    "The calendar gave this event no stable identifier, so it is matched by its dates. If its dates change, it can look like one stay ending and another beginning.",
+  DUPLICATE_UID:
+    "The calendar lists this event more than once with different details. Every version stays protected until you review it.",
+  INVALID_SOURCE_EVENT:
+    "The calendar still lists this event, but it could not be read. Its dates stay protected as last seen.",
+  AMBIGUOUS_TIME:
+    "The event’s time could not be placed exactly in the property’s time zone: it falls on a clock change, or names a time zone that is not recognized. The widest plausible range is protected.",
+  OVERRIDE_SOURCE_CHANGED:
+    "The calendar changed this event after you made a decision about it. Your decision still applies until you change it, and changing it here does not change the platform.",
+  CONTRADICTORY_HISTORY:
+    "This event came back after you reopened its dates, so they are protected again. Check the platform before deciding.",
+  UPDATE_DEFERRED:
+    "The calendar shows different dates, but applying them would remove protection, so the change waits for a complete, healthy check.",
+  FOREIGN_ECHO_UID:
+    "This event carries the identifier of an export link from this service, but not one of this property’s dates, for example another property’s link imported by mistake. It stays protected and unclassified; check the platform’s calendar settings.",
+  STALE_CANCELLATION_IGNORED:
+    "A cancellation older than the current version of this stay arrived and was ignored; the newer version stays protected.",
+  BEYOND_COVERAGE:
+    "The calendar no longer lists this event, but it falls after the last date the calendar currently shows, so its absence is not treated as a cancellation. If the stay was cancelled, reopen the dates; otherwise mark this reviewed.",
+};
+
 export const CONFLICT_LABEL: Record<string, string> = {
   RESERVATION_RESERVATION: "Possible double booking",
   RESERVATION_HOLD: "Reservation overlaps a hold",
@@ -166,3 +195,28 @@ export const TASK_REASON: Record<string, string> = {
   RECLASSIFIED_DURING_WORK:
     "The dates stopped counting as a stay while cleaning was under way.",
 };
+
+/** How a label in a connection's policy question reads to the host. */
+export const policyLabelName = (key: string, text: string | null) =>
+  key === "none"
+    ? "No label"
+    : key === "other"
+      ? "Any other label"
+      : `“${text ?? key}”`;
+
+/**
+ * The answer pre-selected before the host has decided (CLASS 02). Label rules
+ * are unverified (CLASS 01), so they only ever pre-select "by label", which
+ * leaves every unmatched label Unknown; a blanket "guest reservations" would
+ * turn a platform's owner closures into cleaning work (CLEAN 01). Without a
+ * suggestion nothing is pre-selected and the host must choose.
+ */
+export function suggestedPolicyMode(
+  labels: readonly { suggested: string | null }[],
+): "BY_LABEL" | null {
+  return labels.some(
+    (l) => l.suggested === "RESERVATION" || l.suggested === "OWNER_BLOCK",
+  )
+    ? "BY_LABEL"
+    : null;
+}

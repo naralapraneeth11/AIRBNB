@@ -664,11 +664,16 @@ type ConnectionEvidence = {
 };
 
 const POLICY_LABEL: Record<string, string> = {
-  UNSET: "Not answered: blocks stay unknown and protected",
   RESERVATIONS: "Blocks are guest reservations",
   OWNER_BLOCKS: "Blocks are your own closures",
   BY_LABEL: "Decided by each block’s label",
 };
+const policyText = (p: Connection["policy"]) =>
+  p.mode !== "UNSET"
+    ? POLICY_LABEL[p.mode]
+    : p.decidedAt
+      ? "You classify each block yourself; until then it stays unknown and protected"
+      : "Not answered: blocks stay unknown and protected";
 
 function ConnectionDetail({ id }: { id: string }) {
   const { data, show, mutate, toast } = useWorkspace();
@@ -731,7 +736,7 @@ function ConnectionDetail({ id }: { id: string }) {
         {c.importing && (
           <div>
             <dt>How its blocks count</dt>
-            <dd>{POLICY_LABEL[c.policy.mode]}</dd>
+            <dd>{policyText(c.policy)}</dd>
           </div>
         )}
         {c.importing && (
@@ -817,8 +822,10 @@ function ConnectionDetail({ id }: { id: string }) {
               )
             }
           >
-            {c.policy.mode === "UNSET" ? "Answer" : "Change"}: how its blocks
-            count
+            {c.policy.mode === "UNSET" && !c.policy.decidedAt
+              ? "Answer"
+              : "Change"}
+            : how its blocks count
           </Button>
         )}
         {c.importing && (

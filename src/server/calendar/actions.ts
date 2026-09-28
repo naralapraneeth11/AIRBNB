@@ -381,12 +381,29 @@ export async function policySample(tx: Tx, ctx: Context, connectionId: string) {
     (b) => b.connectionId === c.id && isProtective(b),
   );
   const platform = c.platform as Platform;
-  const labels = new Map<string, number>();
+  const policy = connectionPolicy(c);
+  const counts = new Map<string, number>();
   for (const b of blocks)
-    labels.set(
+    counts.set(
       b.sourceLabelKey ?? "none",
-      (labels.get(b.sourceLabelKey ?? "none") ?? 0) + 1,
+      (counts.get(b.sourceLabelKey ?? "none") ?? 0) + 1,
     );
+  // Every label the host can answer for: the observed ones, any answered
+  // before, and the platform's known labels, so a label that has not been
+  // seen yet can be answered in advance instead of arriving as Unknown.
+  const keys = new Set([
+    ...counts.keys(),
+    ...Object.keys(policy.labels ?? {}),
+    ...capabilityOf(platform).labelRules.map((r) => r.key),
+  ]);
+  const labels = [...keys]
+    .map((key) => ({
+      key,
+      text: labelRule(platform, key)?.text ?? null,
+      count: counts.get(key) ?? 0,
+      suggested: labelRule(platform, key)?.suggests ?? null,
+    }))
+    .sort((a, b) => b.count - a.count || (a.key < b.key ? -1 : 1));
   const sample = blocks.slice(0, SAMPLE_SIZE).map((b) => ({
     startDate: b.startDate,
     endDate: b.endDate,
@@ -396,14 +413,10 @@ export async function policySample(tx: Tx, ctx: Context, connectionId: string) {
   }));
   return {
     platform,
-    policy: connectionPolicy(c),
+    policy: { ...policy, decidedAt: c.policyDecidedAt },
     singleLabelForStaysAndClosures:
       capabilityOf(platform).singleLabelForStaysAndClosures,
-    labels: [...labels].map(([key, count]) => ({
-      key,
-      count,
-      suggested: labelRule(platform, key)?.suggests ?? null,
-    })),
+    labels,
     sample,
     total: blocks.length,
     sampleDigest: digestOf(sample),
@@ -462,8 +475,10 @@ export async function setClassificationPolicy(
       policyMode: policy.mode,
       policyLabels: policy.labels ?? Prisma.DbNull,
       policyVersion: policy.version,
-      policyDecidedBy: input.mode === "UNSET" ? null : ctx.actorId,
-      policyDecidedAt: input.mode === "UNSET" ? null : now,
+      // Choosing to classify each block yourself is an answer too: the
+      // question leaves Today and unknown blocks are listed one by one.
+      policyDecidedBy: ctx.actorId,
+      policyDecidedAt: now,
       policyEvidenceEncrypted: seal(
         { sample: shown.sample, labels: shown.labels, total: shown.total },
         ctx.workspaceId,

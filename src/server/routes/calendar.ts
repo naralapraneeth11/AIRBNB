@@ -113,7 +113,7 @@ const isUnknown = (r: AvailabilityBlock) =>
  * before reopening (LIFE 01), unknown blocks and pending connection policy
  * questions (CLASS 02), flagged evidence, and open overlaps (CONFLICT 01).
  */
-async function attention(tx: Tx, ctx: Context) {
+export async function attention(tx: Tx, ctx: Context) {
   const recent = new Date(Date.now() - 2 * 86_400_000);
   const rows = await tx.availabilityBlock.findMany({
     where: {
@@ -145,6 +145,7 @@ async function attention(tx: Tx, ctx: Context) {
       enabled: true,
       importUrlEncrypted: { not: null },
       policyMode: "UNSET",
+      policyDecidedAt: null,
     },
     select: { id: true },
   });

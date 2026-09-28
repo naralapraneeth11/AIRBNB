@@ -10,6 +10,8 @@ export const RULES_VERSION = "calendar-rules/2026-09-27.1";
 export type LabelRule = {
   /** Stable, non-personal key stored instead of the raw summary (DATA 03). */
   key: string;
+  /** The label as the platform shows it, for the host's policy question. */
+  text: string;
   matches: (summary: string) => boolean;
   suggests: HostClass;
   /**
@@ -71,12 +73,14 @@ export const CAPABILITIES: Record<Platform, Capability> = {
     labelRules: [
       {
         key: "reserved",
+        text: "Reserved",
         matches: exact("Reserved"),
         suggests: "RESERVATION",
         verifiedBy: [],
       },
       {
         key: "not-available",
+        text: "Airbnb (Not available)",
         matches: exact("Airbnb (Not available)"),
         suggests: "OWNER_BLOCK",
         verifiedBy: [],
@@ -98,12 +102,14 @@ export const CAPABILITIES: Record<Platform, Capability> = {
     labelRules: [
       {
         key: "reserved",
+        text: "Reserved …",
         matches: (s) => /^reserved\b/i.test(s.trim()),
         suggests: "RESERVATION",
         verifiedBy: [],
       },
       {
         key: "blocked",
+        text: "Blocked …",
         matches: (s) => /^blocked\b/i.test(s.trim()),
         suggests: "OWNER_BLOCK",
         verifiedBy: [],
@@ -125,6 +131,7 @@ export const CAPABILITIES: Record<Platform, Capability> = {
     labelRules: [
       {
         key: "closed",
+        text: "CLOSED - Not available",
         matches: exact("CLOSED - Not available"),
         suggests: "UNKNOWN",
         verifiedBy: [],

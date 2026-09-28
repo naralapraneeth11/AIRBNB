@@ -17,9 +17,18 @@ async function load() {
   const actions = await import("../../src/server/calendar/actions");
   const run = await import("../../src/server/calendar/run");
   const serve = await import("../../src/server/calendar/serve");
+  const routes = await import("../../src/server/routes/calendar");
   const crypto = await import("../../src/server/crypto");
   const dates = await import("../../src/domain/calendar/dates");
-  return { ...db, ...actions, ...run, ...serve, ...crypto, ...dates };
+  return {
+    ...db,
+    ...actions,
+    ...run,
+    ...serve,
+    attention: routes.attention,
+    ...crypto,
+    ...dates,
+  };
 }
 
 before(async () => {
@@ -171,6 +180,20 @@ test(
       }),
     );
     assert.equal(answered.reclassified, 3);
+    // Reopening the question shows the stored answer, not a default.
+    const again = await app.tenant(A.ctx, (tx) =>
+      app.policySample(tx, A.ctx, airbnb.id),
+    );
+    assert.equal(again.policy.mode, "BY_LABEL");
+    assert.deepEqual(again.policy.labels, {
+      reserved: "RESERVATION",
+      "not-available": "OWNER_BLOCK",
+    });
+    assert.ok(again.policy.decidedAt);
+    assert.deepEqual(again.labels.map((l) => [l.key, l.text]).sort(), [
+      ["not-available", "Airbnb (Not available)"],
+      ["reserved", "Reserved"],
+    ]);
     await app.tenant(A.ctx, async (tx) => {
       const reservations = await tx.reservation.findMany();
       assert.equal(reservations.length, 2);
@@ -632,5 +655,58 @@ test(
       ),
       { numRuns: 12 },
     );
+  },
+);
+
+test(
+  "classifying each block yourself answers the policy question; blocks stay unknown (CLASS 02)",
+  { skip },
+  async () => {
+    const P = await seedWorkspace("P");
+    const created = await app.tenant(P.ctx, (tx) =>
+      app.createConnection(tx, P.ctx, {
+        listingId: P.listing.id,
+        platform: "AIRBNB",
+        url: "https://www.airbnb.com/calendar/ical/9.ics?s=secret",
+        label: null,
+      }),
+    );
+    const id = created.connection.id;
+    await app.runConnection(P.ctx, id, {
+      trigger: "MANUAL",
+      fetcher: body(ics(["only@airbnb.com", 5, 8, "Reserved"])),
+    });
+    const pending = await app.tenant(P.ctx, (tx) => app.attention(tx, P.ctx));
+    assert.deepEqual(pending.policyQuestions, [id]);
+
+    const sample = await app.tenant(P.ctx, (tx) =>
+      app.policySample(tx, P.ctx, id),
+    );
+    assert.equal(sample.policy.decidedAt, null);
+    // A known label not observed yet can be answered in advance.
+    assert.deepEqual(
+      sample.labels.map((l) => [l.key, l.count]),
+      [
+        ["reserved", 1],
+        ["not-available", 0],
+      ],
+    );
+    await app.tenant(P.ctx, (tx) =>
+      app.setClassificationPolicy(tx, P.ctx, id, {
+        mode: "UNSET",
+        labels: null,
+        expectedVersion: 0,
+        sampleDigest: sample.sampleDigest,
+      }),
+    );
+    const after = await app.tenant(P.ctx, (tx) => app.attention(tx, P.ctx));
+    assert.deepEqual(after.policyQuestions, [], "the question is answered");
+    assert.equal(after.blocks.length, 1, "the block is listed on its own");
+    assert.equal(after.blocks[0].effectiveClass, "UNKNOWN");
+    const answered = await app.tenant(P.ctx, (tx) =>
+      app.policySample(tx, P.ctx, id),
+    );
+    assert.equal(answered.policy.mode, "UNSET");
+    assert.ok(answered.policy.decidedAt);
   },
 );

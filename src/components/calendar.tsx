@@ -22,6 +22,7 @@ import {
   CLASS_LABEL,
   CONFLICT_LABEL,
   EVIDENCE_LABEL,
+  FLAG_EXPLANATION,
   FLAG_LABEL,
   HOLD_LABEL,
   blockState,
@@ -29,7 +30,9 @@ import {
   connectionStatus,
   needsClassification,
   needsDecision,
+  policyLabelName,
   protective,
+  suggestedPolicyMode,
   type Tone,
 } from "@/lib/calendar-copy";
 import { useNow } from "@/lib/use-now";
@@ -644,6 +647,12 @@ function DayCell({
   );
 }
 
+const LISTED = 10;
+const lowerFirst = (text: string) =>
+  text.charAt(0).toLowerCase() + text.slice(1);
+const flagsText = (b: CalendarBlock) =>
+  b.reviewFlags.map((f) => lowerFirst(FLAG_LABEL[f] ?? label(f))).join(", ");
+
 /** Today's questions (CLASS 02, LIFE 01, CONFLICT 01), whatever month shows. */
 function AttentionPanel({ attention }: { attention: Attention }) {
   const { data, show } = useWorkspace();
@@ -718,34 +727,47 @@ function AttentionPanel({ attention }: { attention: Attention }) {
         row(
           c.id,
           <TriangleAlert />,
-          `${property(c.listingId)}: ${CONFLICT_LABEL[c.kind]}`,
+          `${property(c.listingId)}: ${lowerFirst(CONFLICT_LABEL[c.kind] ?? label(c.kind))}`,
           `Overlap ${c.overlapStart} → ${c.overlapEnd}. Both remain protected; nothing was cancelled.`,
           () =>
             show("Overlapping dates", <ConflictDetail conflict={c} />, true),
         ),
       )}
       {unknown
-        .slice(0, 10)
+        .slice(0, LISTED)
         .map((b) =>
           row(
             b.id,
             <CircleHelp />,
-            `${property(b.listingId)}: unknown block`,
+            `${property(b.listingId)}: unknown block${b.reviewFlags.length ? ", " + flagsText(b) : ""}`,
             `${b.startDate} → ${b.endDate} · protected; classify it to schedule cleaning if it is a stay.`,
             () => show("Protected dates", <BlockDetail id={b.id} />, true),
           ),
         )}
       {flagged
-        .slice(0, 10)
+        .slice(0, LISTED)
         .map((b) =>
           row(
             b.id,
             <Info />,
-            `${property(b.listingId)}: ${b.reviewFlags.map((f) => FLAG_LABEL[f] ?? label(f)).join(", ")}`,
+            `${property(b.listingId)}: ${flagsText(b)}`,
             `${b.startDate} → ${b.endDate} · review the evidence; dates stay protected.`,
             () => show("Protected dates", <BlockDetail id={b.id} />, true),
           ),
         )}
+      {(unknown.length > LISTED || flagged.length > LISTED) && (
+        <p className="panel-footnote">
+          {[
+            unknown.length > LISTED &&
+              `${unknown.length - LISTED} more unknown block${unknown.length - LISTED === 1 ? "" : "s"}`,
+            flagged.length > LISTED &&
+              `${flagged.length - LISTED} more flagged date range${flagged.length - LISTED === 1 ? "" : "s"}`,
+          ]
+            .filter(Boolean)
+            .join(" and ")}{" "}
+          are marked in the calendar below.
+        </p>
+      )}
       {attention.capped && (
         <p className="panel-footnote">
           Showing the first 300 items. Resolve these to see more.
@@ -904,8 +926,30 @@ function BlockDetail({ id }: { id: string }) {
       )}
       {b.reviewFlags.length > 0 && (
         <div className="callout">
-          <strong>Review: </strong>
-          {b.reviewFlags.map((f) => FLAG_LABEL[f] ?? label(f)).join(", ")}.
+          <strong>Review</strong>
+          <ul className="review-flags">
+            {b.reviewFlags.map((f) => (
+              <li key={f}>
+                <strong>{FLAG_LABEL[f] ?? label(f)}.</strong>{" "}
+                {FLAG_EXPLANATION[f] ?? "Check the evidence."}
+                {f === "OVERRIDE_SOURCE_CHANGED" && (
+                  <>
+                    {" "}
+                    Your decision:{" "}
+                    {b.overrideClassification
+                      ? CLASS_LABEL[b.overrideClassification]
+                      : "no classification override"}
+                    {b.buffer.overridden
+                      ? `; buffer days ${b.buffer.before} before, ${b.buffer.after} after`
+                      : ""}
+                    . The calendar now shows {b.startDate} → {b.endDate}, which
+                    on its own counts as{" "}
+                    {CLASS_LABEL[b.classification]?.toLowerCase() ?? "unknown"}.
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
           <div className="form-actions">
             <AcknowledgeButton block={b} />
           </div>
@@ -1010,6 +1054,7 @@ function ActionForm({
   path,
   build,
   label: buttonLabel,
+  done = "Saved.",
   children,
   back,
   method = "POST",
@@ -1017,6 +1062,8 @@ function ActionForm({
   path: string;
   build: (f: FormData) => unknown;
   label: string;
+  /** What the host is told once the action is recorded. */
+  done?: string;
   children: ReactNode;
   back?: string;
   method?: string;
@@ -1036,7 +1083,7 @@ function ActionForm({
             build(new FormData(e.currentTarget)),
             method,
           );
-          toast("Saved.");
+          toast(done);
           const target = back ?? result?.id;
           if (target)
             show("Protected dates", <BlockDetail id={target} />, true);
@@ -1091,6 +1138,7 @@ function ReleaseForm({
       path={`blocks/${b.id}/release`}
       back={b.id}
       label="Reopen these dates"
+      done="Dates released. You can restore them for 24 hours."
       build={(f) => ({
         expectedRevision: preview.revision,
         reason: f.get("reason"),
@@ -1170,6 +1218,7 @@ function KeepForm({ block: b }: { block: CalendarBlock }) {
       path={`blocks/${b.id}/keep`}
       back={b.id}
       label="Keep blocked"
+      done="Dates kept blocked."
       build={(f) => ({ expectedRevision: b.revision, reason: f.get("reason") })}
     >
       <p className="form-intro">
@@ -1181,11 +1230,25 @@ function KeepForm({ block: b }: { block: CalendarBlock }) {
   );
 }
 
+/** REL 01: in shadow mode nothing is served yet; say so where copy promises it. */
+function ShadowNote({ turnover = false }: { turnover?: boolean }) {
+  const { data } = useWorkspace();
+  if (data.workspace.calendarMode !== "SHADOW") return null;
+  return (
+    <p className="form-intro muted">
+      Shadow mode: export links start serving these dates
+      {turnover ? ", and turnover work is scheduled," : ""} when this workspace
+      goes live.
+    </p>
+  );
+}
+
 function RestoreForm({ block: b }: { block: CalendarBlock }) {
   return (
     <ActionForm
       path={`blocks/${b.id}/restore`}
       label="Restore protection"
+      done="Dates protected again with a new hold."
       build={(f) => ({ expectedRevision: b.revision, reason: f.get("reason") })}
     >
       <p className="callout">
@@ -1194,6 +1257,7 @@ function RestoreForm({ block: b }: { block: CalendarBlock }) {
         that already reopened these dates, or cancel a booking made in the
         meantime.
       </p>
+      <ShadowNote />
       <ReasonField />
     </ActionForm>
   );
@@ -1205,6 +1269,7 @@ function ClassifyForm({ block: b }: { block: CalendarBlock }) {
       path={`blocks/${b.id}/classify`}
       back={b.id}
       label="Save classification"
+      done="Classification saved."
       build={(f) => ({
         expectedRevision: b.revision,
         classification:
@@ -1264,6 +1329,7 @@ function BufferForm({ block: b }: { block: CalendarBlock }) {
       path={`blocks/${b.id}/buffers`}
       back={b.id}
       label="Save buffer days"
+      done="Buffer days saved."
       build={(f) => ({
         expectedRevision: b.revision,
         before: f.get("before") === "" ? null : Number(f.get("before")),
@@ -1275,6 +1341,7 @@ function BufferForm({ block: b }: { block: CalendarBlock }) {
         Leave a field empty to use the property default. Buffer days are
         published to every export link as unavailable.
       </p>
+      <ShadowNote />
       <div className="form-grid">
         {day("before")}
         {day("after")}
@@ -1359,10 +1426,23 @@ function ReservationEdit({
   );
 }
 
+type PolicyMode = Connection["policy"]["mode"];
+type PolicyLabel = {
+  key: string;
+  /** The label as the platform shows it; null for no label or others. */
+  text: string | null;
+  count: number;
+  suggested: string | null;
+};
 type PolicySample = {
-  policy: { mode: string; version: number };
+  policy: {
+    mode: PolicyMode;
+    labels: Record<string, string> | null;
+    version: number;
+    decidedAt: string | null;
+  };
   singleLabelForStaysAndClosures: boolean;
-  labels: { key: string; count: number; suggested: string | null }[];
+  labels: PolicyLabel[];
   sample: {
     startDate: string;
     endDate: string;
@@ -1377,7 +1457,8 @@ type PolicySample = {
 export function PolicyQuestion({ connection: c }: { connection: Connection }) {
   const { mutate, close, toast } = useWorkspace();
   const [sample, setSample] = useState<PolicySample | null>(null),
-    [modeChoice, setModeChoice] = useState<string | null>(null),
+    [modeChoice, setModeChoice] = useState<PolicyMode | null>(null),
+    [reload, setReload] = useState(0),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -1392,17 +1473,24 @@ export function PolicyQuestion({ connection: c }: { connection: Connection }) {
     return () => {
       active = false;
     };
-  }, [c.id]);
+  }, [c.id, reload]);
   if (error && !sample) return <ErrorBox message={error} />;
   if (!sample) return <p className="muted">Loading the observed events…</p>;
   const name = c.label || c.platformName;
+  const decided =
+    sample.policy.mode !== "UNSET" || sample.policy.decidedAt !== null;
   const mode =
     modeChoice ??
-    (sample.policy.mode === "UNSET" ? "RESERVATIONS" : sample.policy.mode);
+    (decided ? sample.policy.mode : suggestedPolicyMode(sample.labels));
+  const byKey = new Map(sample.labels.map((l) => [l.key, l]));
   return (
     <form
       onSubmit={async (e) => {
         e.preventDefault();
+        if (!mode) {
+          setError(`Choose how blocks from ${name} should count.`);
+          return;
+        }
         const f = new FormData(e.currentTarget);
         setBusy(true);
         setError("");
@@ -1428,6 +1516,10 @@ export function PolicyQuestion({ connection: c }: { connection: Connection }) {
           close();
         } catch (err) {
           setError((err as Error).message);
+          // The calendar or the policy changed meanwhile: show the new
+          // evidence so the answer is given against what is current.
+          if (err instanceof APIError && err.status === 409)
+            setReload((r) => r + 1);
         } finally {
           setBusy(false);
         }
@@ -1462,7 +1554,10 @@ export function PolicyQuestion({ connection: c }: { connection: Connection }) {
               <td>{s.startDate}</td>
               <td>{s.endDate}</td>
               <td>
-                {s.labelKey === "none" ? "No label" : s.labelKey}
+                {policyLabelName(
+                  s.labelKey,
+                  byKey.get(s.labelKey)?.text ?? null,
+                )}
                 {s.identityUncertain ? " (identity uncertain)" : ""}
               </td>
             </tr>
@@ -1471,12 +1566,17 @@ export function PolicyQuestion({ connection: c }: { connection: Connection }) {
       </table>
       <fieldset className="choices">
         <legend>Blocks from {name} are</legend>
-        {[
-          ["RESERVATIONS", "Guest reservations: schedule turnover cleaning"],
-          ["OWNER_BLOCKS", "My own closures: no cleaning"],
-          ["BY_LABEL", "It depends on the label"],
-          ["UNSET", "I will decide for each block"],
-        ].map(([value, text]) => (
+        {(
+          [
+            ["BY_LABEL", "It depends on the label"],
+            [
+              "RESERVATIONS",
+              "All guest reservations: schedule turnover cleaning",
+            ],
+            ["OWNER_BLOCKS", "All my own closures: no cleaning"],
+            ["UNSET", "I will classify each block myself"],
+          ] as const
+        ).map(([value, text]) => (
           <label className="checkbox" key={value}>
             <input
               type="radio"
@@ -1493,9 +1593,9 @@ export function PolicyQuestion({ connection: c }: { connection: Connection }) {
         sample.labels.map((l) => (
           <Field
             key={l.key}
-            label={`“${l.key === "none" ? "No label" : l.key}” (${l.count})`}
+            label={`${policyLabelName(l.key, l.text)} · ${l.count ? `${l.count} observed` : "not observed yet"}`}
             hint={
-              l.suggested
+              l.suggested && l.suggested !== "UNKNOWN"
                 ? `Suggested: ${CLASS_LABEL[l.suggested]} (unverified; you decide)`
                 : undefined
             }
@@ -1503,23 +1603,21 @@ export function PolicyQuestion({ connection: c }: { connection: Connection }) {
             <select
               name={"label:" + l.key}
               defaultValue={
-                sample.policy.mode === "BY_LABEL"
-                  ? undefined
-                  : (l.suggested ?? "UNKNOWN")
+                sample.policy.labels?.[l.key] ?? l.suggested ?? "UNKNOWN"
               }
             >
               <option value="RESERVATION">Guest reservation</option>
               <option value="OWNER_BLOCK">Owner block</option>
-              <option value="UNKNOWN">Unknown</option>
+              <option value="UNKNOWN">Unknown: protected, no cleaning</option>
             </select>
           </Field>
         ))}
       {error && <ErrorBox message={error} />}
       <div className="form-actions">
         <Button type="button" onClick={close}>
-          Ask me later
+          {decided ? "Cancel" : "Ask me later"}
         </Button>
-        <Button primary disabled={busy} type="submit">
+        <Button primary disabled={busy || !mode} type="submit">
           {busy ? "Saving…" : "Save answer"}
         </Button>
       </div>
@@ -1599,7 +1697,7 @@ function OverlapForm({
   label: string;
   children: ReactNode;
 }) {
-  const { mutate, close, toast } = useWorkspace();
+  const { data, mutate, close, toast } = useWorkspace();
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [overlaps, setOverlaps] = useState<Overlap[] | null>(null),
@@ -1621,7 +1719,11 @@ function OverlapForm({
             ...build(new FormData(e.currentTarget)),
             acknowledgeOverlaps: acknowledged,
           });
-          toast("Saved. Every export link for this property includes it.");
+          toast(
+            data.workspace.calendarMode === "SHADOW"
+              ? "Saved. Export links include it once this workspace goes live."
+              : "Saved. Every export link for this property includes it.",
+          );
           close();
         } catch (err) {
           if (err instanceof APIError && err.code === "DATE_CONFLICT")
@@ -1765,6 +1867,7 @@ export function HoldForm({
         A hold protects these nights in every export link for the property. It
         is yours: calendar checks never remove it.
       </p>
+      <ShadowNote />
       <PropertyDates
         initial={initial}
         listingId={listingId}
@@ -1816,6 +1919,7 @@ function DirectReservationForm() {
         Record an agreed direct stay. It protects these nights in every export
         link and schedules turnover work. No payment is collected.
       </p>
+      <ShadowNote turnover />
       <PropertyDates
         initial={{}}
         listingId={listingId}

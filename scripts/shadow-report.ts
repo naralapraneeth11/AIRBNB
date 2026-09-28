@@ -92,7 +92,11 @@ async function main(args: string[]) {
           property: property.get(c.listingId) ?? c.listingId,
           platform: c.platform,
           label: c.label,
-          policy: c.policyMode,
+          // UNSET after an explicit answer means "classify each block".
+          policy:
+            c.policyMode === "UNSET" && c.policyDecidedAt
+              ? "PER_BLOCK"
+              : c.policyMode,
           checks: mine.length,
           shadowChecks: mine.filter((o) => o.mode === "SHADOW").length,
           daysWithAcceptedCheck: new Set(

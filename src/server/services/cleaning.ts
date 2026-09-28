@@ -11,6 +11,7 @@ import {
   stayExpected,
   type TurnoverTask,
 } from "@/domain/cleaning/turnover";
+import { todayIn } from "@/domain/calendar/dates";
 import type { BlockState, Lifecycle } from "@/domain/calendar/types";
 
 const CLOSED = ["CANCELLED", "SUPERSEDED"];
@@ -158,9 +159,11 @@ export async function applyTurnover(
         status === "SUPERSEDED"
           ? "A turnover moved with its stay"
           : "A turnover was cancelled",
-        task.cleanerId
-          ? `${listing.name}: the assigned cleaner is notified when cleaning automation is on; otherwise let them know yourself.`
-          : `${listing.name}: no cleaner was assigned.`,
+        `${listing.name}, turnover on ${todayIn(listing.timezone, task.scheduledAt.getTime())}: ${
+          task.cleanerId
+            ? "the assigned cleaner is notified when cleaning automation is on; otherwise let them know yourself."
+            : "no cleaner was assigned, so there is no one to tell."
+        }`,
         "/cleaning",
       );
     } else if (op.type === "FLAG_REVIEW") {

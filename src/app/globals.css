@@ -1113,6 +1113,13 @@ dd {
   line-height: 1.8;
   margin: 20px 0;
 }
+.review-flags {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.review-flags li + li {
+  margin-top: 8px;
+}
 .explain-list article {
   padding: 20px 0;
   border-bottom: 1px solid var(--line);

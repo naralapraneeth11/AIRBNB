@@ -80,13 +80,21 @@ async function main(args: string[]) {
         tx.conflictCase.count({ where: { workspaceId, state: "OPEN" } }),
       ]);
       // Shadow mode sent no alerts, so summarize what is already waiting.
-      if (decisions || conflicts)
+      const waiting = [
+        decisions &&
+          `${decisions} date range${decisions === 1 ? " waits" : "s wait"} for your decision`,
+        conflicts &&
+          `${conflicts} overlap${conflicts === 1 ? " is" : "s are"} open`,
+      ]
+        .filter(Boolean)
+        .join(" and ");
+      if (waiting)
         await notify(
           tx,
           ctx,
           `calendar-live:${new Date().toISOString().slice(0, 10)}`,
           "Calendar changes are live",
-          `${decisions} date range(s) wait for your decision and ${conflicts} overlap(s) are open. Nothing reopens without your review.`,
+          `${waiting[0].toUpperCase()}${waiting.slice(1)}. Nothing reopens without your review.`,
           "/calendar",
         );
     });
