@@ -3,6 +3,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { ArrowRight, ShieldCheck, CalendarDays, Workflow } from "lucide-react";
 import { api } from "@/lib/client";
+import { BRAND } from "@/lib/brand";
 import { Button, Field, ErrorBox } from "./ui";
 export function SignIn({ configured }: { configured: boolean }) {
   const [error, setError] = useState(""),
@@ -11,9 +12,10 @@ export function SignIn({ configured }: { configured: boolean }) {
     <main id="main" className="login">
       <section className="login-story">
         <Link className="brand" href="/">
-          <span className="brand-mark">a</span>
+          <span className="brand-mark">{BRAND.mark}</span>
           <span>
-            airbnb <small>AUTOMATION</small>
+            {BRAND.wordmark}{" "}
+            {BRAND.descriptor && <small>{BRAND.descriptor}</small>}
           </span>
         </Link>
         <div>

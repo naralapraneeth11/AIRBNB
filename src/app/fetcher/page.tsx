@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { FETCH_POLICY } from "@/domain/calendar/schedule";
+import { BRAND } from "@/lib/brand";
 import { FETCH_LIMITS } from "@/server/calendar/fetch";
 
 // FETCH 02: the calendar fetcher's user agent links here, so a calendar
@@ -19,7 +20,7 @@ export default function Fetcher() {
     <main id="main" className="info-page">
       <h1>About this calendar fetcher</h1>
       <p>
-        Requests with the user agent <code>Hostsphere-CalendarFetcher</code>{" "}
+        Requests with the user agent <code>{BRAND.token}-CalendarFetcher</code>{" "}
         come from this deployment. It reads iCalendar export links that a host
         connected for a property they manage, so their dates stay protected
         across the platforms they use.

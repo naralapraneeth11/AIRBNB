@@ -93,6 +93,19 @@ export function InboxView() {
         title="Every conversation, considered."
         description="A personal touch. Clear context. You’re always in control."
       />
+      {!data.integrations.some((i) => i.enabled) && (
+        <p className="callout shadow-banner" role="note">
+          <Info size={16} aria-hidden="true" />
+          <span>
+            <strong>Guest messages need a messaging connection.</strong>{" "}
+            Calendar links share dates only; they never carry guest
+            conversations. Airbnb, Vrbo, Booking.com and Expedia messages arrive
+            here only through an approved messaging service, set up in Settings
+            → Native guest messaging. Direct-booking guests can be answered by
+            email once email is configured.
+          </span>
+        </p>
+      )}
       <div className="inbox-filters">
         <select
           aria-label="Filter inbox by property"
@@ -177,7 +190,7 @@ export function InboxView() {
           ) : (
             <Empty
               title="A little quiet."
-              detail="Conversations arrive through your configured messaging integrations."
+              detail="Conversations arrive through an approved messaging connection or direct-booking email. Calendar links never include messages."
             />
           )}
         </aside>

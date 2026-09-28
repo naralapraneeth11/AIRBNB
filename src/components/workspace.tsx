@@ -27,6 +27,7 @@ import {
   Check,
 } from "lucide-react";
 import { api, label, dateTime } from "@/lib/client";
+import { BRAND } from "@/lib/brand";
 import type { WorkspaceData, AuditEntry } from "@/lib/types";
 import type { Command as Intent } from "@/lib/domain";
 import { Modal, Button, Badge, ErrorBox, Skeleton, Empty } from "./ui";
@@ -188,11 +189,12 @@ export function Workspace({ section }: { section: string }) {
         <Link
           href="/calendar"
           className="brand"
-          aria-label="Airbnb Automation home"
+          aria-label={`${BRAND.name} home`}
         >
-          <span className="brand-mark">a</span>
+          <span className="brand-mark">{BRAND.mark}</span>
           <span className="brand-label">
-            airbnb<small>AUTOMATION</small>
+            {BRAND.wordmark}
+            {BRAND.descriptor && <small>{BRAND.descriptor}</small>}
           </span>
         </Link>
         <div className="workspace-name">

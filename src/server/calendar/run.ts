@@ -13,6 +13,7 @@ import {
   type Snapshot,
 } from "@/domain/calendar/pipeline";
 import { REASONS } from "@/domain/calendar/reasons";
+import { BRAND } from "@/lib/brand";
 import { isNearTerm, nextFetch } from "@/domain/calendar/schedule";
 import { audit, notify } from "../audit";
 import { appUrl } from "../config";
@@ -48,7 +49,7 @@ type Fetcher = typeof fetchFeed;
 
 /** FETCH 02: an honest user agent and a contact page identify the fetcher. */
 export const userAgent = () =>
-  `Hostsphere-CalendarFetcher/1.0 (+${appUrl()}/fetcher)`;
+  `${BRAND.token}-CalendarFetcher/1.0 (+${appUrl()}/fetcher)`;
 
 const allowedOps = (g: Gate) =>
   [
