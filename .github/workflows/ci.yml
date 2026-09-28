@@ -70,6 +70,9 @@ jobs:
       - name: Unit, domain, fixture and property tests
         run: pnpm test
 
+      - name: PostgreSQL client (the integration harness applies the shipped grant script)
+        run: command -v psql || (sudo apt-get update -q && sudo apt-get install -yq postgresql-client)
+
       - name: Database integration tests (real PostgreSQL, RLS enforced)
         run: pnpm test:integration
 

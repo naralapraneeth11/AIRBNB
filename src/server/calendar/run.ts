@@ -282,6 +282,13 @@ async function decideAndApply(
       platform: claim.platform,
       policy: connectionPolicy(c),
       coverageEnd: c.coverageEnd ? toLocalDate(c.coverageEnd) : null,
+      anomaly:
+        c.anomalyFingerprint && c.anomalyHealth
+          ? {
+              fingerprint: c.anomalyFingerprint,
+              health: c.anomalyHealth as "EMPTY_ANOMALY" | "DROP_ANOMALY",
+            }
+          : null,
     },
     property: { zone: listing.timezone, checkoutHour: listing.checkoutHour },
     blocks: blocks.filter((b) => b.connectionId === c.id),
@@ -433,6 +440,8 @@ async function decideAndApply(
           }
         : {}),
       ...validators,
+      anomalyFingerprint: plan.anomaly?.fingerprint ?? null,
+      anomalyHealth: plan.anomaly?.health ?? null,
       failures,
       nearTerm,
       nextFetchAt: new Date(schedule.atMs),

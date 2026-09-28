@@ -400,6 +400,9 @@ model ChannelConnection {
   lastAcceptedAt          DateTime?
   lastAcceptedFingerprint String?
   lastAcceptedComplete    Boolean   @default(false)
+  /// CAL 04: anomaly verdict for this content fingerprint (sticky until it changes).
+  anomalyFingerprint      String?
+  anomalyHealth           String?
   coverageEnd             DateTime? @db.Date
   nearTerm                Boolean   @default(false)
   nextFetchAt             DateTime  @default(now())

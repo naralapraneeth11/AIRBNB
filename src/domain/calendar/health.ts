@@ -37,8 +37,15 @@ export type HealthInput = {
   previousFutureKeys: ReadonlySet<string>;
   coverageEnd: LocalDate | null;
   previousCoverageEnd: LocalDate | null;
+  /**
+   * The anomaly already found for this exact content (CAL 04). Checks add
+   * protection, which changes the comparison base; without this, the same
+   * anomalous content could be judged healthy when it is simply seen again.
+   */
+  knownAnomaly?: AnomalyHealth | null;
 };
 
+export type AnomalyHealth = "EMPTY_ANOMALY" | "DROP_ANOMALY";
 export const DROP_ANOMALY_THRESHOLD = 0.5;
 
 export function assessHealth(input: HealthInput): Gate {
@@ -67,7 +74,10 @@ export function assessHealth(input: HealthInput): Gate {
       reasons,
     };
   }
-  if (input.futureKeys.size === 0 && input.previousFutureKeys.size > 0)
+  if (
+    input.knownAnomaly === "EMPTY_ANOMALY" ||
+    (input.futureKeys.size === 0 && input.previousFutureKeys.size > 0)
+  )
     return {
       health: "EMPTY_ANOMALY",
       additions: false,
@@ -81,8 +91,9 @@ export function assessHealth(input: HealthInput): Gate {
   for (const key of input.previousFutureKeys)
     if (!input.futureKeys.has(key)) vanished++;
   if (
-    input.previousFutureKeys.size > 0 &&
-    vanished / input.previousFutureKeys.size > DROP_ANOMALY_THRESHOLD
+    input.knownAnomaly === "DROP_ANOMALY" ||
+    (input.previousFutureKeys.size > 0 &&
+      vanished / input.previousFutureKeys.size > DROP_ANOMALY_THRESHOLD)
   )
     return {
       health: "DROP_ANOMALY",

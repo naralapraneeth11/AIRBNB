@@ -4,7 +4,7 @@
 import { needsPolicyQuestion } from "./classify";
 import { compare, type CompareResult, type DecisionType } from "./compare";
 import { type LocalDate } from "./dates";
-import { assessHealth, type Gate } from "./health";
+import { assessHealth, type AnomalyHealth, type Gate } from "./health";
 import {
   normalizeCalendar,
   type NormalizeCounts,
@@ -52,7 +52,11 @@ export type ObservationPlan = {
   reasons: ReasonCode[];
   counts: Partial<NormalizeCounts>;
   policyQuestion: boolean;
+  /** The anomaly verdict to keep with the connection (see HealthInput). */
+  anomaly: KnownAnomaly | null;
 };
+
+export type KnownAnomaly = { fingerprint: string; health: AnomalyHealth };
 
 export type PlanInput = {
   fetch: FetchOutcome;
@@ -64,6 +68,7 @@ export type PlanInput = {
     platform: Platform;
     policy: ConnectionPolicy;
     coverageEnd: LocalDate | null;
+    anomaly?: KnownAnomaly | null;
   };
   property: { zone: string; checkoutHour: number };
   blocks: BlockState[];
@@ -154,6 +159,8 @@ export function planObservation(input: PlanInput): ObservationPlan {
       reasons: [failure ?? "FETCH_INTERNAL"],
       counts,
       policyQuestion: false,
+      // Nothing was judged, so an earlier verdict stands.
+      anomaly: input.connection.anomaly ?? null,
     };
   }
 
@@ -181,6 +188,10 @@ export function planObservation(input: PlanInput): ObservationPlan {
     previousFutureKeys,
     coverageEnd: snapshot.coverageEnd,
     previousCoverageEnd: input.connection.coverageEnd,
+    knownAnomaly:
+      input.connection.anomaly?.fingerprint === snapshot.fingerprint
+        ? input.connection.anomaly.health
+        : null,
   });
   for (const r of gate.reasons) reasons.add(r);
 
@@ -228,5 +239,9 @@ export function planObservation(input: PlanInput): ObservationPlan {
     reasons: [...reasons].sort(),
     counts,
     policyQuestion,
+    anomaly:
+      gate.health === "EMPTY_ANOMALY" || gate.health === "DROP_ANOMALY"
+        ? { fingerprint: snapshot.fingerprint, health: gate.health }
+        : null,
   };
 }

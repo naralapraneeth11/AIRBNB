@@ -449,11 +449,14 @@ const system = (workspaceId: string): Context => ({
  * Stage 1 for one workspace: run its due calendar checks under the tick's
  * shared platform budgets. Claiming and fencing happen inside runConnection.
  */
+type RunOptions = Pick<Parameters<typeof runConnection>[2], "fetcher">;
+
 async function runDueConnections(
   workspaceId: string,
   deadline: number,
   budget: ReturnType<typeof platformBudget>,
   stats: TickStats,
+  options: RunOptions,
 ) {
   const ctx = system(workspaceId);
   const now = new Date();
@@ -482,7 +485,9 @@ async function runDueConnections(
     const results = await Promise.allSettled(
       selected
         .slice(i, i + CONCURRENCY)
-        .map((c) => runConnection(ctx, c.id, { trigger: "SCHEDULED" })),
+        .map((c) =>
+          runConnection(ctx, c.id, { trigger: "SCHEDULED", ...options }),
+        ),
     );
     for (const r of results) {
       if (r.status === "rejected") {
@@ -692,7 +697,11 @@ async function measureBacklog(workspaceId: string, stats: TickStats) {
  * what remains, and releases its lease. A 200 from the endpoint therefore
  * never stands in for progress; the recorded tick does.
  */
-export async function runTick(trigger: "CRON_HTTP" | "WORKER") {
+export async function runTick(
+  trigger: "CRON_HTTP" | "WORKER",
+  /** Tests inject a fetcher; production always uses the hardened one. */
+  options: RunOptions = {},
+) {
   await ensureDatabaseSafety();
   const id = randomUUID();
   const startedAt = new Date();
@@ -703,6 +712,17 @@ export async function runTick(trigger: "CRON_HTTP" | "WORKER") {
            "leaseUntil" = ${new Date(startedAt.getTime() + TICK_LEASE_MS)}
      WHERE "id" = 'scheduler'
        AND ("leaseUntil" IS NULL OR "leaseUntil" < ${startedAt})`;
+  const stats: TickStats = {
+    workspaces: 0,
+    claimed: 0,
+    completed: 0,
+    failed: 0,
+    retries: 0,
+    dispatched: 0,
+    backlog: 0,
+    oldestDueAt: null,
+    oldestOutboxDueAt: null,
+  };
   if (!leased) {
     // The clock still fired: a heartbeat, but no claim on work.
     await db.schedulerTick.create({
@@ -715,22 +735,11 @@ export async function runTick(trigger: "CRON_HTTP" | "WORKER") {
         durationMs: 0,
       },
     });
-    return { id, status: "SKIPPED_OVERLAP" as const, durationMs: 0 };
+    return { id, status: "SKIPPED_OVERLAP" as const, durationMs: 0, ...stats };
   }
   await db.schedulerTick.create({
     data: { id, trigger, status: "RUNNING", startedAt },
   });
-  const stats: TickStats = {
-    workspaces: 0,
-    claimed: 0,
-    completed: 0,
-    failed: 0,
-    retries: 0,
-    dispatched: 0,
-    backlog: 0,
-    oldestDueAt: null,
-    oldestOutboxDueAt: null,
-  };
   let status: "COMPLETED" | "FAILED" = "COMPLETED";
   let errorCode: string | null = null;
   try {
@@ -753,7 +762,13 @@ export async function runTick(trigger: "CRON_HTTP" | "WORKER") {
         Date.now() + WORKSPACE_BUDGET_MS,
       );
       try {
-        await runDueConnections(w.id, workspaceDeadline, budget, stats);
+        await runDueConnections(
+          w.id,
+          workspaceDeadline,
+          budget,
+          stats,
+          options,
+        );
         stats.dispatched += (
           await dispatchOutbox(
             w.id,

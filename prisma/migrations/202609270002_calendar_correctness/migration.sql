@@ -89,6 +89,10 @@ CREATE TABLE "ChannelConnection" (
     "lastAcceptedAt" TIMESTAMP(3),
     "lastAcceptedFingerprint" TEXT,
     "lastAcceptedComplete" BOOLEAN NOT NULL DEFAULT false,
+    -- CAL 04: an anomaly verdict and the content it applies to, so the same
+    -- anomalous content is never judged healthy just because it recurs.
+    "anomalyFingerprint" TEXT,
+    "anomalyHealth" TEXT,
     "coverageEnd" DATE,
     "nearTerm" BOOLEAN NOT NULL DEFAULT false,
     "nextFetchAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -111,7 +115,10 @@ CREATE TABLE "ChannelConnection" (
     CONSTRAINT connection_last_result CHECK ("lastResult" IS NULL OR "lastResult" IN ('NO_CHANGES','UPDATED','NEEDS_REVIEW','COULD_NOT_CHECK')),
     CONSTRAINT connection_import_pair CHECK (("importUrlEncrypted" IS NULL) = ("importUrlDigest" IS NULL)),
     CONSTRAINT connection_counters CHECK ("exportTokenGeneration" >= 1 AND "fence" >= 0 AND "failures" >= 0 AND "policyVersion" >= 0),
-    CONSTRAINT connection_lease_pair CHECK (("leaseToken" IS NULL) = ("leaseUntil" IS NULL))
+    CONSTRAINT connection_lease_pair CHECK (("leaseToken" IS NULL) = ("leaseUntil" IS NULL)),
+    CONSTRAINT connection_anomaly CHECK (
+      ("anomalyFingerprint" IS NULL) = ("anomalyHealth" IS NULL)
+      AND ("anomalyHealth" IS NULL OR "anomalyHealth" IN ('EMPTY_ANOMALY','DROP_ANOMALY')))
 );
 CREATE UNIQUE INDEX "ChannelConnection_exportTokenHash_key" ON "ChannelConnection"("exportTokenHash");
 CREATE UNIQUE INDEX "ChannelConnection_workspaceId_id_key" ON "ChannelConnection"("workspaceId", "id");

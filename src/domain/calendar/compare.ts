@@ -10,6 +10,7 @@
 //     missing-event timer still advances on later eligible observations.
 import { classifyEvent } from "./classify";
 import { contains, type LocalDate } from "./dates";
+import { canonicalJson } from "./digest";
 import type { Gate } from "./health";
 import type { NormalizedEvent } from "./normalize";
 import type { ReasonCode } from "./reasons";
@@ -23,6 +24,14 @@ import {
 } from "./types";
 
 /** Two eligible observations at least this far apart escalate a missing event. */
+/**
+ * Evidence equality independent of key order: evidence read back from the
+ * database's jsonb has its keys reordered, and must not look "changed"
+ * (CAL 04: an unchanged observation changes nothing).
+ */
+const sameEvidence = (a: unknown, b: unknown) =>
+  canonicalJson(a) === canonicalJson(b);
+
 export const MISSING_SPACING_MS = 15 * 60_000;
 
 export type DecisionType =
@@ -350,7 +359,7 @@ export function compare(input: CompareInput): CompareResult {
       : c.evidence;
     if (
       b.classification !== nextClass ||
-      JSON.stringify(b.classificationEvidence) !== JSON.stringify(nextEvidence)
+      !sameEvidence(b.classificationEvidence, nextEvidence)
     ) {
       if (b.classification !== nextClass)
         decide("RECLASSIFY", key, b.id, "RECLASSIFIED");
@@ -494,7 +503,7 @@ export function reclassifyForPolicy(input: {
     );
     if (
       c.classification === b.classification &&
-      JSON.stringify(c.evidence) === JSON.stringify(b.classificationEvidence)
+      sameEvidence(c.evidence, b.classificationEvidence)
     )
       continue;
     if (c.classification !== b.classification)

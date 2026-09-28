@@ -2,11 +2,7 @@
 // example, and the Appendix B Phase 1 rules, exercised without I/O.
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  planObservation,
-  type PlanInput,
-} from "../src/domain/calendar/pipeline";
-import { compare, type NewBlock } from "../src/domain/calendar/compare";
+import { compare } from "../src/domain/calendar/compare";
 import { assessHealth } from "../src/domain/calendar/health";
 import {
   releaseBlock,
@@ -31,109 +27,14 @@ import {
   isNearTerm,
 } from "../src/domain/calendar/schedule";
 import { rangeOf } from "../src/domain/calendar/normalize";
-import type {
-  BlockState,
-  ConnectionPolicy,
-} from "../src/domain/calendar/types";
-
-const UNSET: ConnectionPolicy = { mode: "UNSET", labels: null, version: 0 };
-const cal = (...events: string[][]) =>
-  [
-    "BEGIN:VCALENDAR",
-    "VERSION:2.0",
-    "PRODID:-//test//EN",
-    ...events.flat(),
-    "END:VCALENDAR",
-  ].join("\r\n");
-const vevent = (
-  uid: string | null,
-  start: string,
-  end: string,
-  extra: string[] = [],
-) => [
-  "BEGIN:VEVENT",
-  ...(uid ? [`UID:${uid}`] : []),
-  `DTSTART;VALUE=DATE:${start.replaceAll("-", "")}`,
-  `DTEND;VALUE=DATE:${end.replaceAll("-", "")}`,
-  ...extra,
-  "END:VEVENT",
-];
-const broken = (uid: string) => [
-  "BEGIN:VEVENT",
-  `UID:${uid}`,
-  "DTSTART;VALUE=DATE:2026AB01",
-  "END:VEVENT",
-];
-
-let counter = 0;
-const materialize = (b: NewBlock): BlockState => ({
-  ...b,
-  id: `blk-${String(++counter).padStart(4, "0")}`,
-});
-
-/** A tiny in-memory store that applies plans exactly as the adapter does. */
-function harness(
-  opts: {
-    platform?: PlanInput["connection"]["platform"];
-    policy?: ConnectionPolicy;
-  } = {},
-) {
-  let blocks: BlockState[] = [];
-  let snapshot: PlanInput["snapshot"] = null;
-  let fingerprint: string | null = null;
-  let coverageEnd: string | null = null;
-  let revision = 0;
-  const connection = {
-    id: "conn-1",
-    listingId: "listing-1",
-    platform: opts.platform ?? ("AIRBNB" as const),
-    policy: opts.policy ?? UNSET,
-  };
-  return {
-    get blocks() {
-      return blocks;
-    },
-    set policy(p: ConnectionPolicy) {
-      connection.policy = p;
-    },
-    observe(fetch: PlanInput["fetch"], at: string, today = at.slice(0, 10)) {
-      const plan = planObservation({
-        fetch,
-        snapshot,
-        lastAcceptedFingerprint: fingerprint,
-        connection: { ...connection, coverageEnd },
-        property: { zone: "UTC", checkoutHour: 11 },
-        blocks: blocks.filter((b) => b.connectionId === connection.id),
-        knownBlockIds: new Set(blocks.map((b) => b.id)),
-        today,
-        now: at,
-        nextRevision: revision + 1,
-      });
-      const changed =
-        plan.compare.creates.length + plan.compare.updates.length > 0;
-      if (changed) revision++;
-      const updates = new Map(plan.compare.updates.map((u) => [u.id, u]));
-      blocks = blocks
-        .map((b) => updates.get(b.id) ?? b)
-        .concat(plan.compare.creates.map(materialize));
-      if (plan.accepted && plan.snapshot) {
-        if (plan.contentChanged) snapshot = plan.snapshot;
-        fingerprint = plan.snapshot.fingerprint;
-        coverageEnd = plan.snapshot.coverageEnd;
-      }
-      return plan;
-    },
-    replace(next: BlockState) {
-      blocks = blocks.map((b) => (b.id === next.id ? next : b));
-    },
-    add(b: NewBlock) {
-      const m = materialize(b);
-      blocks = [...blocks, m];
-      return m;
-    },
-    byKey: (key: string) => blocks.find((b) => b.sourceKey === key)!,
-  };
-}
+import {
+  UNSET,
+  broken,
+  cal,
+  harness,
+  materialize,
+  vevent,
+} from "./helpers/calendar-harness";
 
 test("DATE 01: exclusive end dates, one-day default and reversed ranges", () => {
   const date = (d: string) => ({ kind: "DATE" as const, date: d });
@@ -378,6 +279,48 @@ test("CAL 04: repeating the same observation produces no further changes", () =>
     );
   }
   assert.equal(JSON.stringify(h.blocks), snapshotOfBlocks);
+});
+
+test("CAL 04: anomalous content stays anomalous when it is simply seen again", () => {
+  // Found by the property tests: the anomalous check itself adds "a", which
+  // enlarged the comparison base, so the identical repeat looked healthy and
+  // began the missing lifecycle for "b".
+  const h = harness();
+  h.observe(
+    { outcome: "BODY", body: cal(vevent("b", "2026-10-05", "2026-10-06")) },
+    "2026-10-01T00:00:00.000Z",
+  );
+  const onlyA = {
+    outcome: "BODY" as const,
+    body: cal(vevent("a", "2026-10-05", "2026-10-06")),
+  };
+  const first = h.observe(onlyA, "2026-10-01T00:05:00.000Z");
+  assert.equal(first.gate.health, "DROP_ANOMALY");
+  for (const [i, fetch] of [
+    onlyA,
+    onlyA,
+    { outcome: "NOT_MODIFIED" as const },
+  ].entries()) {
+    const again = h.observe(fetch, `2026-10-01T0${i + 1}:00:00.000Z`);
+    assert.equal(again.gate.health, "DROP_ANOMALY");
+    assert.equal(
+      again.compare.creates.length + again.compare.updates.length,
+      0,
+    );
+  }
+  assert.equal(h.byKey("b").lifecycle, "ACTIVE");
+  // New content is judged afresh.
+  const next = h.observe(
+    {
+      outcome: "BODY",
+      body: cal(
+        vevent("a", "2026-10-05", "2026-10-06"),
+        vevent("c", "2026-10-20", "2026-10-22"),
+      ),
+    },
+    "2026-10-01T05:00:00.000Z",
+  );
+  assert.equal(next.anomaly, null);
 });
 
 test("Health gate: failures, empty feeds and mass disappearance never remove protection", () => {

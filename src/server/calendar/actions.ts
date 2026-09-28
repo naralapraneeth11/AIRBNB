@@ -1122,32 +1122,51 @@ export async function recordConflictResolution(
 // REL 01: switching a workspace from shadow to live effects
 // ---------------------------------------------------------------------------
 /** Bring turnover work in line with every current reservation after going live. */
+/**
+ * Bring one property's turnover work in line with its current reservations
+ * (idempotent: the planner only acts on differences). Used when a workspace
+ * goes live, since shadow mode records reservations without turnover work.
+ */
+export async function reconcileListingTurnovers(
+  tx: Tx,
+  ctx: Context,
+  listingId: string,
+  now = new Date(),
+) {
+  await lock(tx, "listing:" + listingId);
+  const listing = await tx.listing.findFirst({
+    where: { workspaceId: ctx.workspaceId, id: listingId, archivedAt: null },
+  });
+  if (!listing) return 0;
+  const blocks = new Map(
+    (await loadPropertyBlocks(tx, ctx, listing.id)).map((b) => [b.id, b]),
+  );
+  const rows = await tx.reservation.findMany({
+    where: {
+      workspaceId: ctx.workspaceId,
+      listingId: listing.id,
+      endDate: {
+        gte: fromLocalDate(todayIn(listing.timezone, now.getTime())),
+      },
+    },
+  });
+  let reservations = 0;
+  for (const r of rows) {
+    const block = r.blockId ? blocks.get(r.blockId) : undefined;
+    if (!block) continue;
+    await applyTurnover(tx, ctx, listing, r, block, now);
+    reservations++;
+  }
+  return reservations;
+}
+
 export async function reconcileTurnovers(tx: Tx, ctx: Context) {
   const listings = await tx.listing.findMany({
     where: { workspaceId: ctx.workspaceId, archivedAt: null },
+    select: { id: true },
   });
-  const now = new Date();
   let reservations = 0;
-  for (const listing of listings) {
-    await lock(tx, "listing:" + listing.id);
-    const blocks = new Map(
-      (await loadPropertyBlocks(tx, ctx, listing.id)).map((b) => [b.id, b]),
-    );
-    const rows = await tx.reservation.findMany({
-      where: {
-        workspaceId: ctx.workspaceId,
-        listingId: listing.id,
-        endDate: {
-          gte: fromLocalDate(todayIn(listing.timezone, now.getTime())),
-        },
-      },
-    });
-    for (const r of rows) {
-      const block = r.blockId ? blocks.get(r.blockId) : undefined;
-      if (!block) continue;
-      await applyTurnover(tx, ctx, listing, r, block, now);
-      reservations++;
-    }
-  }
+  for (const l of listings)
+    reservations += await reconcileListingTurnovers(tx, ctx, l.id);
   return { reservations };
 }
