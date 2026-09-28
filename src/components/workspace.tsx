@@ -33,6 +33,7 @@ import type { Command as Intent } from "@/lib/domain";
 import { Modal, Button, Badge, ErrorBox, Skeleton, Empty } from "./ui";
 import { CalendarView, BlockForm } from "./calendar";
 import { InboxView } from "./inbox";
+import { SetupView } from "./setup";
 import { CleaningView } from "./cleaning";
 import {
   PropertiesView,
@@ -384,6 +385,8 @@ export function Workspace({ section }: { section: string }) {
                   <InsightsView />
                 ) : section === "settings" ? (
                   <SettingsView />
+                ) : section === "setup" ? (
+                  <SetupView />
                 ) : (
                   <ActivityView />
                 )}

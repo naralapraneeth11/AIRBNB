@@ -56,6 +56,7 @@ import { reportError } from "./observability";
 import { dayAdd } from "@/lib/domain";
 import { body, bytes, formBody, json, range } from "./http";
 import { calendarRoutes } from "./routes/calendar";
+import { onboardingRoutes } from "./routes/onboarding";
 import { operationsHealth } from "./routes/operations";
 import { createConnection } from "./calendar/actions";
 import { propertySettingsChanged } from "./calendar/commit";
@@ -629,6 +630,8 @@ export async function handle(request: NextRequest) {
     }
     const calendar = await calendarRoutes(request, path, method, ctx);
     if (calendar) return calendar;
+    const onboarding = await onboardingRoutes(request, path, method, ctx);
+    if (onboarding) return onboarding;
     if (path[0] === "cleaning-tasks") {
       if (method === "GET")
         return json(

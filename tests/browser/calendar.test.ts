@@ -10,37 +10,26 @@
 // `pnpm build`, and Chromium (`pnpm exec playwright-core install chromium`,
 // or BROWSER_EXECUTABLE). Skipped otherwise, unless REQUIRE_BROWSER_TESTS=1.
 import assert from "node:assert/strict";
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
-import { createServer } from "node:net";
-import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { after, before, test } from "node:test";
+import type { Browser, BrowserContext, Page } from "playwright-core";
+import { createTestDatabase, type TestDatabase } from "../integration/harness";
 import {
-  chromium,
-  type Browser,
-  type BrowserContext,
-  type Page,
-} from "playwright-core";
-import {
-  createTestDatabase,
-  skip as noDatabase,
-  type TestDatabase,
-} from "../integration/harness";
-
-const ROOT = process.cwd();
-const built = existsSync(path.join(ROOT, ".next", "BUILD_ID"));
-const skip =
-  process.env.REQUIRE_BROWSER_TESTS === "1"
-    ? false
-    : noDatabase || (built ? false : "Run `pnpm build` first");
+  ROOT,
+  freePort,
+  launchBrowser,
+  skip,
+  startServer,
+  watch as watchPage,
+  type Server,
+} from "./harness";
 
 const EMAIL = "browser-host@example.test";
 const PASSWORD = "browser-checks-password";
 const PROPERTY = "Browser cabin";
 
 let t: TestDatabase | undefined;
-let server: ChildProcess | undefined;
-let serverLog = "";
+let server: Server | undefined;
 let browser: Browser | undefined;
 let desktop: BrowserContext | undefined;
 let page: Page;
@@ -50,48 +39,7 @@ let day: (n: number) => string = String;
 
 /** Every failed request and browser error; only expected ones may remain. */
 const problems: string[] = [];
-
-async function freePort() {
-  return new Promise<number>((resolve, reject) => {
-    const probe = createServer();
-    probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", () => {
-      const address = probe.address();
-      probe.close(() =>
-        typeof address === "object" && address
-          ? resolve(address.port)
-          : reject(new Error("No free port")),
-      );
-    });
-  });
-}
-
-async function waitForServer(url: string, deadlineMs: number) {
-  while (Date.now() < deadlineMs) {
-    if (server?.exitCode !== null && server?.exitCode !== undefined)
-      throw new Error(`next start exited early:\n${serverLog}`);
-    try {
-      if ((await fetch(url)).ok) return;
-    } catch {
-      // Not listening yet.
-    }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  throw new Error(`The server did not answer in time:\n${serverLog}`);
-}
-
-function watch(p: Page) {
-  p.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
-  p.on("console", (m) => {
-    if (m.type() === "error") problems.push(`console: ${m.text()}`);
-  });
-  p.on("response", (r) => {
-    if (r.url().includes("/api/") && r.status() >= 400)
-      problems.push(
-        `http ${r.status()} ${r.request().method()} ${new URL(r.url()).pathname}`,
-      );
-  });
-}
+const watch = (p: Page) => watchPage(p, problems);
 
 const dialog = () => page.locator("dialog[open]");
 const toast = () => page.locator(".toast[role=status]");
@@ -189,35 +137,8 @@ before(async () => {
   });
   await db.$disconnect();
 
-  server = spawn(
-    process.execPath,
-    [
-      path.join(ROOT, "node_modules/next/dist/bin/next"),
-      "start",
-      "-p",
-      String(port),
-    ],
-    {
-      cwd: ROOT,
-      env: {
-        ...process.env,
-        ...t.env,
-        NODE_ENV: "production",
-        NEXT_TELEMETRY_DISABLED: "1",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  const collect = (chunk: Buffer) => {
-    serverLog = (serverLog + chunk.toString()).slice(-20_000);
-  };
-  server.stdout?.on("data", collect);
-  server.stderr?.on("data", collect);
-  await waitForServer(`${base}/login`, Date.now() + 90_000);
-
-  browser = await chromium.launch({
-    executablePath: process.env.BROWSER_EXECUTABLE || undefined,
-  });
+  server = await startServer(port, t.env);
+  browser = await launchBrowser();
   desktop = await browser.newContext({
     viewport: { width: 1440, height: 1000 },
     timezoneId: "UTC",
@@ -229,11 +150,7 @@ before(async () => {
 
 after(async () => {
   await browser?.close();
-  if (server && server.exitCode === null && server.signalCode === null) {
-    const exited = new Promise((r) => server?.once("exit", r));
-    server.kill("SIGTERM");
-    await exited;
-  }
+  await server?.stop();
   await t?.drop();
 });
 

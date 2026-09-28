@@ -3300,6 +3300,11 @@ td {
   flex-shrink: 0;
   margin-top: 5px;
 }
+.shadow-banner a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 .stale-notice {
   display: flex;
   gap: 16px;
@@ -3393,4 +3398,131 @@ td {
 }
 .info-page code {
   font-size: 0.9em;
+}
+
+/* Guided setup (AUTH 04) */
+.setup-steps {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 0 20px;
+  padding: 0;
+}
+.setup-steps button {
+  width: 100%;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--muted);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.setup-steps button:disabled {
+  cursor: default;
+}
+/* The current step is not a link to itself, but it is not dimmed either. */
+.setup-steps li.current button:disabled {
+  opacity: 1;
+}
+.setup-caption {
+  display: none;
+}
+.setup-steps li.current button {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.setup-steps li.done button,
+.setup-steps li.skipped button {
+  color: var(--text);
+}
+.setup-steps small {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.setup-step-mark {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  font-size: 0.8rem;
+}
+.setup-steps li.current .setup-step-mark,
+.setup-steps li.done .setup-step-mark {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.setup-panel {
+  padding: 26px;
+  max-width: 760px;
+}
+.setup-panel h2 {
+  font-size: 1.35rem;
+  margin: 0 0 12px;
+}
+.setup-counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin: 18px 0;
+}
+.setup-counts div {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.setup-counts dt {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.setup-counts dd {
+  font-size: 1.5rem;
+  margin: 6px 0 0;
+}
+.setup-rehearsal {
+  margin: 0 0 20px;
+  padding-left: 20px;
+  line-height: 1.7;
+}
+.setup-rehearsal li + li {
+  margin-top: 8px;
+}
+@media (max-width: 720px) {
+  /* A compact row of step marks, with the current step named below. */
+  .setup-steps {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .setup-steps button {
+    padding: 6px;
+    border: none;
+    background: none;
+  }
+  .setup-steps button > span:not(.setup-step-mark) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .setup-caption {
+    display: block;
+    margin: 0 0 16px;
+    font-size: 0.9rem;
+    color: var(--muted);
+  }
+  .setup-panel {
+    padding: 18px;
+  }
 }

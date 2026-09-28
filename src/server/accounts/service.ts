@@ -15,6 +15,7 @@ import {
 } from "../crypto";
 import { db, ensureDatabaseSafety } from "../db";
 import { ensure } from "../errors";
+import { beginSetup } from "../routes/onboarding";
 import { createOwnerAccount } from "./bootstrap";
 import {
   deliver,
@@ -113,7 +114,7 @@ export async function verifyRegistration(token: string) {
       "ACCOUNT_EXISTS",
       "An account already uses this address. Sign in instead.",
     );
-    return createOwnerAccount(tx, {
+    const account = await createOwnerAccount(tx, {
       email: decrypt(pending.emailEncrypted, "identity"),
       name: pending.name,
       passwordHash: pending.passwordHash,
@@ -121,6 +122,9 @@ export async function verifyRegistration(token: string) {
       reason:
         "Account created by email sign-up after the address was verified. Automation starts paused; FAQ rules start in draft mode.",
     });
+    // A new host lands in guided setup (AUTH 04).
+    await beginSetup(tx, account.workspaceId);
+    return account;
   });
 }
 
