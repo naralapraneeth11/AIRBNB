@@ -5,7 +5,7 @@
 // (GET /api/health/operations) reports as separate heartbeat and progress
 // signals (OPS 01). A 200 here means the endpoint answered, nothing more.
 
-export default {
+const clock = {
   async scheduled(_controller, env, ctx) {
     ctx.waitUntil(tick(env));
   },
@@ -14,6 +14,8 @@ export default {
     return new Response("Not found", { status: 404 });
   },
 };
+
+export default clock;
 
 async function tick(env) {
   if (!env.APP_URL || !env.CRON_SECRET)

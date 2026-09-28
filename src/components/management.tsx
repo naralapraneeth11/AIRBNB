@@ -33,10 +33,29 @@ import {
   RefreshCw,
   LockKeyhole,
 } from "lucide-react";
-import { SyncDot } from "./calendar";
+import { useSearchParams } from "next/navigation";
+import { ConnectionDot, PolicyQuestion } from "./calendar";
 import { CleanerForm } from "./cleaning";
+import { useNow } from "@/lib/use-now";
+import { connectionStatus, RESULT_WORDING } from "@/lib/calendar-copy";
+import { CAPABILITIES } from "@/domain/calendar/capabilities";
+import { PLATFORMS } from "@/domain/calendar/types";
+import { REASONS, isReasonCode } from "@/domain/calendar/reasons";
+import type { Connection } from "@/lib/types";
 export function PropertiesView() {
-  const { data, show } = useWorkspace();
+  const { data, show, toast } = useWorkspace();
+  const now = useNow();
+  const params = useSearchParams();
+  const opened = useRef(false);
+  // Deep link from calendar alerts: /properties?connection=…
+  useEffect(() => {
+    const id = params.get("connection");
+    if (!id || opened.current) return;
+    opened.current = true;
+    const c = data.connections.find((x) => x.id === id);
+    if (c) show("Calendar connection", <ConnectionDetail id={c.id} />, true);
+    else toast("That calendar connection was not found.");
+  }, [params, data.connections, show, toast]);
   return (
     <>
       <Head
@@ -78,10 +97,12 @@ export function PropertiesView() {
                 <footer>
                   <span>{l.bufferDays} buffer day(s)</span>
                   <span>
-                    {data.sources
-                      .filter((s) => s.listingId === l.id)
-                      .map((s) => (
-                        <SyncDot key={s.id} source={s} />
+                    {data.connections
+                      .filter(
+                        (c) => c.listingId === l.id && c.enabled && c.importing,
+                      )
+                      .map((c) => (
+                        <ConnectionDot key={c.id} connection={c} now={now} />
                       ))}
                   </span>
                 </footer>
@@ -119,7 +140,8 @@ export function PropertiesView() {
           <LinkIcon />
           <h3>Honest connections</h3>
           <p>
-            Know when each feed last polled, and where your attention is needed.
+            See what each calendar showed when it was last checked, and what
+            your export links served.
           </p>
         </div>
         <div>
@@ -149,7 +171,7 @@ function ListingForm({ listing: l }: { listing?: Listing }) {
             <p>
               {l
                 ? "Your settings have been saved."
-                : "Copy this private availability feed to a platform’s Import Calendar setting. For loop prevention, prefer the channel-specific export produced when connecting a source."}
+                : "This is the property’s all-channel export link. For a platform you also import from, use the link issued when you connect that platform: it leaves out that platform’s own stays."}
             </p>
             {r.exportUrl && <CopyValue value={r.exportUrl} />}
             <Button
@@ -400,63 +422,7 @@ function ListingDetail({ listing: initial }: { listing: Listing }) {
           />
         </>
       ) : tab === "Channels" ? (
-        <>
-          <p className="callout">
-            Imports poll every 60–120 seconds. Each platform decides when to
-            refresh your export, often hours later. No real-time two-way update
-            is implied.
-          </p>
-          {data.sources
-            .filter((s) => s.listingId === l.id)
-            .map((s) => (
-              <div className="list-row" key={s.id}>
-                <SyncDot source={s} />
-                <div className="grow">
-                  <strong>{label(s.platform)}</strong>
-                  <small>
-                    {s.lastSyncedAt ? dateTime(s.lastSyncedAt) : "Never synced"}
-                  </small>
-                </div>
-                <Badge>{label(s.status)}</Badge>
-              </div>
-            ))}
-          <Button
-            primary
-            onClick={() =>
-              show("Connect a calendar", <SourceForm listing={l} />)
-            }
-          >
-            <Plus size={15} />
-            Add / replace channel
-          </Button>
-          <Button
-            onClick={() =>
-              show(
-                "Rotate the master feed URL",
-                <MutationForm<{ url: string }>
-                  path={"listings/" + l.id + "/export-token"}
-                  build={() => ({})}
-                  label="Rotate feed URL"
-                  onSaved={(r) =>
-                    show("New master feed URL", <CopyValue value={r.url} />)
-                  }
-                >
-                  <p>
-                    Any platform using the old master URL will stop receiving
-                    updates until you replace it. Channel-specific export URLs
-                    are unaffected.
-                  </p>
-                  <label className="checkbox">
-                    <input type="checkbox" required />
-                    I’m ready to update the platforms using this feed.
-                  </label>
-                </MutationForm>,
-              )
-            }
-          >
-            Rotate master export link
-          </Button>
-        </>
+        <ChannelsTab listing={l} />
       ) : tab === "House manual" ? (
         <>
           <p className="microcopy">
@@ -518,56 +484,471 @@ function ListingDetail({ listing: initial }: { listing: Listing }) {
     </div>
   );
 }
-function SourceForm({ listing }: { listing: Listing }) {
-  const { show } = useWorkspace();
+function ChannelsTab({ listing: l }: { listing: Listing }) {
+  const { data, show } = useWorkspace();
+  const now = useNow();
+  const connections = data.connections.filter((c) => c.listingId === l.id);
   return (
-    <MutationForm<{ exportUrl: string }>
-      path="sources"
-      label="Connect calendar"
+    <>
+      <p className="callout">
+        Connected calendars are checked about every 15 minutes, and every 5
+        minutes when a stay is near. Each platform decides when it imports your
+        export links, often hours later; nothing here is a real-time update.
+      </p>
+      {connections.map((c) => {
+        const status = connectionStatus(c, now);
+        return (
+          <button
+            className="list-row"
+            key={c.id}
+            onClick={() =>
+              show("Calendar connection", <ConnectionDetail id={c.id} />, true)
+            }
+          >
+            <ConnectionDot connection={c} now={now} />
+            <span className="grow">
+              <strong>{c.label || c.platformName}</strong>
+              <small>{status.detail}</small>
+            </span>
+            <Badge
+              tone={
+                status.tone === "critical" || status.tone === "attention"
+                  ? "attention"
+                  : ""
+              }
+            >
+              {status.headline}
+            </Badge>
+          </button>
+        );
+      })}
+      <Button
+        primary
+        onClick={() => show("Connect a calendar", <ConnectForm listing={l} />)}
+      >
+        <Plus size={15} />
+        Connect a calendar
+      </Button>
+    </>
+  );
+}
+
+function ConnectForm({ listing }: { listing: Listing }) {
+  const { show } = useWorkspace();
+  const [platform, setPlatform] = useState<string>("AIRBNB"),
+    [suggestion, setSuggestion] = useState<string | null>(null);
+  const capability = CAPABILITIES[platform as keyof typeof CAPABILITIES];
+  const urlField = useRef<HTMLInputElement>(null);
+  return (
+    <MutationForm<{ connection: Connection; exportUrl: string }>
+      path="connections"
+      label="Connect"
       onSaved={(r) =>
         show(
-          "Complete the connection",
+          "Add this link to " + r.connection.platformName,
           <>
             <p>
-              Paste this channel-specific availability feed into the same
-              platform’s Import Calendar settings. It excludes reservations that
-              originated from that platform.
+              Paste this private link into{" "}
+              {r.connection.platformName === "Other calendar"
+                ? "the calendar’s"
+                : r.connection.platformName + "’s"}{" "}
+              import calendar setting.{" "}
+              {r.connection.importing
+                ? "It holds every protected date except this calendar’s own stays, so the platform never imports its own bookings back."
+                : "It holds every protected date for this property."}
             </p>
             <CopyValue value={r.exportUrl} />
             <p className="microcopy">
-              Treat this URL like a password. Reconnecting this channel rotates
-              it.
+              Treat this link like a password. You can rotate it from the
+              connection’s detail at any time.
             </p>
           </>,
         )
       }
       build={(f) => ({
         listingId: listing.id,
-        platform: f.get("platform"),
-        url: f.get("url"),
+        platform,
+        url: (f.get("url") as string) || null,
+        label: (f.get("label") as string) || null,
       })}
     >
-      <Field label="Booking platform">
-        <select name="platform">
-          {["AIRBNB", "VRBO", "EXPEDIA", "BOOKING"].map((p) => (
-            <option key={p}>{p}</option>
+      <Field label="Platform" hint={capability?.refreshGuidance}>
+        <select
+          name="platform"
+          value={platform}
+          onChange={(e) => setPlatform(e.target.value)}
+        >
+          {PLATFORMS.map((p) => (
+            <option key={p} value={p}>
+              {CAPABILITIES[p].displayName}
+            </option>
           ))}
         </select>
       </Field>
-      <Field label="Platform export calendar URL">
+      <Field
+        label="The calendar’s export link (optional)"
+        hint="Leave empty for a one-way export link. Only HTTPS links are accepted; the link stays encrypted and never appears in logs."
+      >
         <input
+          ref={urlField}
           name="url"
-          type="url"
-          required
+          type="text"
+          inputMode="url"
           placeholder="https://…/calendar.ics"
           autoComplete="off"
+          onBlur={(e) => {
+            const v = e.target.value.trim();
+            setSuggestion(
+              /^(webcal|http):\/\//i.test(v)
+                ? v.replace(/^(webcal|http):/i, "https:")
+                : null,
+            );
+          }}
         />
       </Field>
-      <p className="microcopy">
-        Your server’s domain allowlist protects against unsafe URLs. Ask your
-        administrator to allow a legitimate provider hostname if it is rejected.
-      </p>
+      {suggestion && (
+        <p className="callout">
+          Calendar links must use HTTPS; the plain address is never used.{" "}
+          <Button
+            type="button"
+            onClick={() => {
+              if (urlField.current) urlField.current.value = suggestion;
+              setSuggestion(null);
+            }}
+          >
+            Use the HTTPS link
+          </Button>
+        </p>
+      )}
+      <Field
+        label="Name (optional)"
+        hint="Helpful when a property has two accounts on one platform."
+      >
+        <input name="label" maxLength={80} autoComplete="off" />
+      </Field>
     </MutationForm>
+  );
+}
+
+type ConnectionEvidence = {
+  connection: Connection;
+  observations: {
+    id: string;
+    observedAt: string;
+    trigger: string;
+    mode: string;
+    outcome: string;
+    httpStatus: number | null;
+    health: string;
+    result: keyof typeof RESULT_WORDING;
+    reasonCodes: string[];
+    counts: Record<string, number>;
+    durationMs: number;
+    recomputed: boolean;
+  }[];
+  exports: {
+    latestVersion: {
+      version: number;
+      createdAt: string;
+      eventCount: number;
+    } | null;
+    latestVersionFirstRetrievedAt: string | null;
+    lastBodyRetrieval: { version: number; lastAt: string } | null;
+    lastValidation: {
+      version: number;
+      lastAt: string;
+      responseClass: string;
+    } | null;
+    staleLinkHits: number;
+  };
+};
+
+const POLICY_LABEL: Record<string, string> = {
+  UNSET: "Not answered: blocks stay unknown and protected",
+  RESERVATIONS: "Blocks are guest reservations",
+  OWNER_BLOCKS: "Blocks are your own closures",
+  BY_LABEL: "Decided by each block’s label",
+};
+
+function ConnectionDetail({ id }: { id: string }) {
+  const { data, show, mutate, toast } = useWorkspace();
+  const now = useNow();
+  const [evidence, setEvidence] = useState<ConnectionEvidence | null>(null),
+    [error, setError] = useState(""),
+    [version, setVersion] = useState(0),
+    [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let active = true;
+    api<ConnectionEvidence>("connections/" + id)
+      .then((r) => {
+        if (active) {
+          setEvidence(r);
+          setError("");
+        }
+      })
+      .catch((e) => {
+        if (active) setError(e.message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [id, version]);
+  if (!evidence) return error ? <ErrorBox message={error} /> : <p>Loading…</p>;
+  const { connection: c, observations, exports: ex } = evidence;
+  const name = c.label || c.platformName;
+  const status = connectionStatus(c, now);
+  const listing = data.listings.find((l) => l.id === c.listingId);
+  async function act(fn: () => Promise<string>) {
+    setBusy(true);
+    setError("");
+    try {
+      toast(await fn());
+      setVersion((v) => v + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="booking-detail">
+      <Badge
+        tone={
+          status.tone === "critical" || status.tone === "attention"
+            ? "attention"
+            : ""
+        }
+      >
+        {status.headline}
+      </Badge>
+      <h2>{name}</h2>
+      <p>
+        {listing?.name} · {c.importing ? "imports and exports" : "export only"}
+      </p>
+      {error && <ErrorBox message={error} />}
+      <p className="callout">{status.detail}</p>
+      <dl>
+        {c.importing && (
+          <div>
+            <dt>How its blocks count</dt>
+            <dd>{POLICY_LABEL[c.policy.mode]}</dd>
+          </div>
+        )}
+        {c.importing && (
+          <div>
+            <dt>Source shows dates through</dt>
+            <dd>{c.coverageEnd ?? "Not established yet"}</dd>
+          </div>
+        )}
+        <div>
+          <dt>Export link version</dt>
+          <dd>
+            {ex.latestVersion
+              ? `Version ${ex.latestVersion.version}, published ${dateTime(ex.latestVersion.createdAt)} (${ex.latestVersion.eventCount} date ranges)`
+              : "No version published yet"}
+          </dd>
+        </div>
+        <div>
+          <dt>Retrieved through this link</dt>
+          <dd>
+            {ex.latestVersion && ex.latestVersionFirstRetrievedAt
+              ? `Version ${ex.latestVersion.version} retrieved through this link at ${dateTime(ex.latestVersionFirstRetrievedAt)}`
+              : "No retrieval observed since this update"}
+          </dd>
+        </div>
+        {ex.lastValidation && (
+          <div>
+            <dt>Last revalidation</dt>
+            <dd>
+              {dateTime(ex.lastValidation.lastAt)}: the requester already held
+              version {ex.lastValidation.version}. This does not show that it
+              was applied.
+            </dd>
+          </div>
+        )}
+        <div>
+          <dt>On {c.platformName}</dt>
+          <dd>
+            Application on {c.platformName} is not confirmed.{" "}
+            {c.refreshGuidance}
+          </dd>
+        </div>
+      </dl>
+      {data.workspace.calendarMode === "SHADOW" && (
+        <p className="callout">
+          Shadow mode: this export link answers “not active yet” until the
+          workspace goes live, so platforms keep their current calendar.
+        </p>
+      )}
+      {ex.staleLinkHits > 0 && (
+        <p className="callout" role="alert">
+          An old, rotated link for this connection was requested{" "}
+          {ex.staleLinkHits} time{ex.staleLinkHits === 1 ? "" : "s"} recently.
+          Update the platform’s import setting with the current link.
+        </p>
+      )}
+      <div className="stack-actions">
+        {c.importing && c.enabled && (
+          <Button
+            disabled={busy}
+            onClick={() =>
+              act(async () => {
+                const r = await api<{
+                  status: string;
+                  reason?: string;
+                  nextEligibleAt?: string | null;
+                }>(`connections/${c.id}/refresh`, { method: "POST", data: {} });
+                return r.status === "QUEUED"
+                  ? "Check queued; it runs within about a minute."
+                  : `${r.reason ?? "A check is not available right now."}${r.nextEligibleAt ? " Next eligible " + dateTime(r.nextEligibleAt) + "." : ""}`;
+              })
+            }
+          >
+            <RefreshCw size={15} />
+            Check now
+          </Button>
+        )}
+        {c.importing && (
+          <Button
+            onClick={() =>
+              show(
+                "How should this calendar’s blocks count?",
+                <PolicyQuestion connection={c} />,
+              )
+            }
+          >
+            {c.policy.mode === "UNSET" ? "Answer" : "Change"}: how its blocks
+            count
+          </Button>
+        )}
+        {c.importing && (
+          <Button
+            onClick={() =>
+              show(
+                "Replace the calendar link",
+                <MutationForm
+                  path={"connections/" + c.id}
+                  method="PATCH"
+                  label="Replace link"
+                  build={(f) => ({ url: f.get("url") })}
+                >
+                  <p className="form-intro">
+                    Use this when the platform issued a new export link. Dates
+                    already imported stay protected.
+                  </p>
+                  <Field label="New export link">
+                    <input
+                      name="url"
+                      required
+                      autoComplete="off"
+                      placeholder="https://…/calendar.ics"
+                    />
+                  </Field>
+                </MutationForm>,
+              )
+            }
+          >
+            Replace the calendar link
+          </Button>
+        )}
+        <Button
+          onClick={() =>
+            show(
+              "Rotate this export link",
+              <MutationForm<{ url: string }>
+                path={`connections/${c.id}/export-token`}
+                build={() => ({})}
+                label="Rotate link"
+                onSaved={(r) =>
+                  show(
+                    "New export link",
+                    <>
+                      <p>
+                        Replace the link in {c.platformName}’s import setting.
+                        The old link now returns a generic “not found”.
+                      </p>
+                      <CopyValue value={r.url} />
+                    </>,
+                  )
+                }
+              >
+                <p>
+                  {c.platformName} stops receiving updates from the old link
+                  until you paste the new one. Requests to the old link are
+                  recorded for 90 days so you can see if it is still in use.
+                </p>
+                <label className="checkbox">
+                  <input type="checkbox" required />
+                  I’m ready to update {c.platformName} with the new link.
+                </label>
+              </MutationForm>,
+            )
+          }
+        >
+          <KeyRound size={15} />
+          Rotate export link
+        </Button>
+        <Button
+          disabled={busy}
+          onClick={() =>
+            act(async () => {
+              await mutate(
+                "connections/" + c.id,
+                { enabled: !c.enabled },
+                "PATCH",
+              );
+              return c.enabled
+                ? "Turned off. Its export link no longer answers; imported dates stay protected."
+                : "Turned on.";
+            })
+          }
+        >
+          <Power size={15} />
+          {c.enabled ? "Turn off" : "Turn on"}
+        </Button>
+      </div>
+      {c.importing && (
+        <section className="explain-list" aria-label="Recent checks">
+          <h3>Recent checks</h3>
+          {observations.length ? (
+            observations.map((o) => (
+              <article key={o.id}>
+                <Badge
+                  tone={
+                    o.result === "COULD_NOT_CHECK" ||
+                    o.result === "NEEDS_REVIEW"
+                      ? "attention"
+                      : ""
+                  }
+                >
+                  {RESULT_WORDING[o.result]}
+                </Badge>
+                <small>
+                  {" "}
+                  {dateTime(o.observedAt)} ·{" "}
+                  {o.trigger === "MANUAL" ? "requested" : "scheduled"}
+                  {o.mode === "SHADOW" ? " · shadow" : ""}
+                  {o.httpStatus ? ` · HTTP ${o.httpStatus}` : ""} ·{" "}
+                  {o.durationMs} ms
+                  {o.recomputed ? " · recomputed on newer dates" : ""}
+                </small>
+                {o.reasonCodes.length > 0 && (
+                  <ul className="limits">
+                    {o.reasonCodes.map((code) => (
+                      <li key={code}>
+                        {isReasonCode(code) ? REASONS[code] : label(code)}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </article>
+            ))
+          ) : (
+            <p className="muted">No checks recorded yet.</p>
+          )}
+        </section>
+      )}
+    </div>
   );
 }
 function CopyValue({ value }: { value: string }) {

@@ -339,7 +339,9 @@ CREATE TABLE "ConflictCase" (
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "ConflictCase_pkey" PRIMARY KEY ("id"),
-    CONSTRAINT conflict_canonical_pair CHECK ("blockAId" < "blockBId"),
+    -- Byte order, matching the application's comparison under any database
+    -- default collation.
+    CONSTRAINT conflict_canonical_pair CHECK ("blockAId" COLLATE "C" < "blockBId" COLLATE "C"),
     CONSTRAINT conflict_kind CHECK ("kind" IN ('RESERVATION_RESERVATION','RESERVATION_HOLD','UNCERTAIN_OVERLAP','BUFFER_ONLY')),
     CONSTRAINT conflict_severity CHECK ("severity" IN ('HIGH','MEDIUM','LOW')),
     CONSTRAINT conflict_state CHECK ("state" IN ('OPEN','RESOLVED')),

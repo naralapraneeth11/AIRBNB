@@ -3267,3 +3267,97 @@ td {
   font-size: 0.78rem;
   margin-top: 4px;
 }
+
+/* Phase 1 calendar states. A11Y 03: state is never color alone; every block
+   also carries text, an icon and an accessible name. */
+.shadow-banner {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin: 0 0 20px;
+}
+.shadow-banner svg {
+  flex-shrink: 0;
+  margin-top: 5px;
+}
+.badge.attention {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--line));
+  background: color-mix(in srgb, var(--warning) 10%, var(--panel-2));
+}
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.calendar-booking.awaiting {
+  outline: 1px dashed var(--warning);
+  outline-offset: -1px;
+}
+.calendar-booking.unknown {
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--listing-color) 15%, var(--panel)),
+    color-mix(in srgb, var(--listing-color) 15%, var(--panel)) 5px,
+    var(--panel) 5px,
+    var(--panel) 7px
+  );
+}
+.calendar-booking.released {
+  opacity: 0.6;
+  text-decoration: line-through;
+  border-left-style: dashed;
+}
+.review-list dd {
+  max-width: 60%;
+}
+.limits {
+  margin: 10px 0;
+  padding-left: 20px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.7;
+}
+.choices {
+  margin: 16px 0;
+}
+.choices legend {
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+.sample-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 16px 0;
+  font-size: 0.88rem;
+}
+.sample-table caption {
+  text-align: left;
+  color: var(--muted);
+  padding-bottom: 8px;
+}
+.sample-table th,
+.sample-table td {
+  text-align: left;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.task-review {
+  font-size: 0.85rem;
+  line-height: 1.6;
+  margin: 8px 0;
+}
+.info-page {
+  max-width: 720px;
+  padding: 60px 25px;
+  margin: auto;
+  line-height: 1.7;
+}
+.info-page h2 {
+  margin-top: 32px;
+  font-size: 1.1rem;
+}
+.info-page code {
+  font-size: 0.9em;
+}

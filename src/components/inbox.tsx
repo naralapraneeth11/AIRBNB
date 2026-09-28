@@ -27,9 +27,9 @@ export function InboxView() {
     );
     const rows = await api<Thread[]>("threads?" + qs);
     setThreads(rows);
-    const requested = params.get("booking");
+    const requested = params.get("reservation");
     if (requested) {
-      const t = rows.find((t) => t.bookingId === requested);
+      const t = rows.find((t) => t.reservationId === requested);
       if (t) setSelected(t.id);
     } else if (!selected && rows[0]) setSelected(rows[0].id);
   }
@@ -186,7 +186,7 @@ export function InboxView() {
             <div className="conversation">
               <header className="conversation-heading">
                 <div>
-                  <h2>{c.booking.guestName}</h2>
+                  <h2>{c.reservation.guestName}</h2>
                   <p>
                     {l?.name} · {label(c.thread.platform)}
                   </p>
@@ -295,7 +295,7 @@ export function InboxView() {
             </div>
             <aside className="guest-context">
               <span className="eyebrow">THE STAY</span>
-              <h3>{c.booking.guestName}</h3>
+              <h3>{c.reservation.guestName}</h3>
               <Badge>{label(c.thread.intent)}</Badge>
               <dl>
                 <div>
@@ -304,19 +304,19 @@ export function InboxView() {
                 </div>
                 <div>
                   <dt>Check-in</dt>
-                  <dd>{c.booking.startDate}</dd>
+                  <dd>{c.reservation.startDate}</dd>
                 </div>
                 <div>
                   <dt>Checkout</dt>
-                  <dd>{c.booking.endDate}</dd>
+                  <dd>{c.reservation.endDate}</dd>
                 </div>
                 <div>
                   <dt>Previous stays</dt>
                   <dd>{c.pastStays}</dd>
                 </div>
                 <div>
-                  <dt>Booking status</dt>
-                  <dd>{label(c.booking.status)}</dd>
+                  <dt>Reservation status</dt>
+                  <dd>{label(c.reservation.status)}</dd>
                 </div>
               </dl>
               <div className="context-manual">

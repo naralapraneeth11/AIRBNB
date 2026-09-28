@@ -1,5 +1,6 @@
 // Calendar API routes (Phase 1). Split from the main router (ARCH 02); the
 // main router authenticates the host and delegates here.
+import type { AvailabilityBlock } from "@prisma/client";
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { HOST_CLASSES, PLATFORMS } from "@/domain/calendar/types";
@@ -67,6 +68,11 @@ async function blocksInRange(tx: Tx, ctx: Context, from: Date, to: Date) {
     orderBy: [{ startDate: "asc" }, { id: "asc" }],
     take: 2000,
   });
+  return { rows, blocks: await decorate(tx, ctx, rows) };
+}
+
+/** Block DTOs with their platform, property buffer default and reservation. */
+async function decorate(tx: Tx, ctx: Context, rows: AvailabilityBlock[]) {
   const [listings, connections, reservations] = await Promise.all([
     tx.listing.findMany({
       where: { workspaceId: ctx.workspaceId },
@@ -86,19 +92,69 @@ async function blocksInRange(tx: Tx, ctx: Context, from: Date, to: Date) {
   const buffers = new Map(listings.map((l) => [l.id, l.bufferDays]));
   const platforms = new Map(connections.map((c) => [c.id, c.platform]));
   const byBlock = new Map(reservations.map((r) => [r.blockId, r]));
+  return rows.map((r) =>
+    blockDTO(r, ctx, {
+      platform: r.connectionId
+        ? (platforms.get(r.connectionId) ?? "OTHER")
+        : r.holdType === "DIRECT_RESERVATION"
+          ? "DIRECT"
+          : "MANUAL",
+      defaultBufferDays: buffers.get(r.listingId) ?? 0,
+      reservation: byBlock.get(r.id) ?? null,
+    }),
+  );
+}
+
+const isUnknown = (r: AvailabilityBlock) =>
+  (r.overrideClassification ?? r.classification) === "UNKNOWN";
+
+/**
+ * Everything waiting on the host, whatever month is on screen: decisions
+ * before reopening (LIFE 01), unknown blocks and pending connection policy
+ * questions (CLASS 02), flagged evidence, and open overlaps (CONFLICT 01).
+ */
+async function attention(tx: Tx, ctx: Context) {
+  const recent = new Date(Date.now() - 2 * 86_400_000);
+  const rows = await tx.availabilityBlock.findMany({
+    where: {
+      workspaceId: ctx.workspaceId,
+      lifecycle: { not: "RELEASED" },
+      OR: [
+        { lifecycle: "AWAITING_DECISION" },
+        {
+          endDate: { gte: recent },
+          OR: [
+            { classification: "UNKNOWN", overrideClassification: null },
+            { overrideClassification: "UNKNOWN" },
+            { reviewFlags: { isEmpty: false } },
+          ],
+        },
+      ],
+    },
+    orderBy: [{ startDate: "asc" }, { id: "asc" }],
+    take: 300,
+  });
+  const conflicts = await tx.conflictCase.findMany({
+    where: { workspaceId: ctx.workspaceId, state: "OPEN" },
+    orderBy: [{ overlapStart: "asc" }, { id: "asc" }],
+    take: 100,
+  });
+  const unset = await tx.channelConnection.findMany({
+    where: {
+      workspaceId: ctx.workspaceId,
+      enabled: true,
+      importUrlEncrypted: { not: null },
+      policyMode: "UNSET",
+    },
+    select: { id: true },
+  });
   return {
-    rows,
-    blocks: rows.map((r) =>
-      blockDTO(r, ctx, {
-        platform: r.connectionId
-          ? (platforms.get(r.connectionId) ?? "OTHER")
-          : r.holdType === "DIRECT_RESERVATION"
-            ? "DIRECT"
-            : "MANUAL",
-        defaultBufferDays: buffers.get(r.listingId) ?? 0,
-        reservation: byBlock.get(r.id) ?? null,
-      }),
-    ),
+    blocks: await decorate(tx, ctx, rows),
+    conflicts: conflicts.map(conflictDTO),
+    policyQuestions: unset
+      .filter((c) => rows.some((r) => r.connectionId === c.id && isUnknown(r)))
+      .map((c) => c.id),
+    capped: rows.length === 300,
   };
 }
 
@@ -169,6 +225,23 @@ export async function calendarRoutes(
       }),
     );
   }
+
+  if (area === "calendar" && id === "attention" && method === "GET")
+    return json(
+      await tenant(ctx, async (tx) => {
+        const result = await attention(tx, ctx);
+        await audit(
+          tx,
+          ctx,
+          "READ",
+          "AvailabilityBlock",
+          null,
+          "Host read calendar items waiting for a decision.",
+          { count: result.blocks.length },
+        );
+        return result;
+      }),
+    );
 
   if (area === "calendar" && id === "block" && method === "POST") {
     const input = V.blockInput.parse(await body(request));

@@ -13,14 +13,18 @@ import {
 import { useWorkspace, MutationForm } from "./workspace";
 import { cleaningStates } from "@/lib/domain";
 import { label, dateTime } from "@/lib/client";
+import { TASK_REASON } from "@/lib/calendar-copy";
 import type { Task } from "@/lib/types";
-import { Head, Button, Empty, Field } from "./ui";
+import { Head, Button, Badge, Empty, Field } from "./ui";
 export function CleaningView() {
   const { data, show } = useWorkspace();
   const [filter, setFilter] = useState("all");
-  const tasks = data.tasks.filter(
+  const all = data.tasks.filter(
     (t) => filter === "all" || t.listingId === filter,
   );
+  // CLEAN 03: cancelled and superseded work leaves the board but stays visible.
+  const tasks = all.filter((t) => !t.closedAt);
+  const closed = all.filter((t) => t.closedAt);
   return (
     <>
       <Head
@@ -62,7 +66,7 @@ export function CleaningView() {
         <section className="panel">
           <Empty
             title="A fresh start for every stay."
-            detail="Turnover tasks appear after a confirmed booking when cleaning automation is enabled. You can also schedule a task yourself."
+            detail="A turnover appears for each confirmed reservation once calendar changes are live. Owner holds and unknown blocks never create cleaning work. You can also schedule a task yourself."
           />
         </section>
       ) : (
@@ -84,6 +88,29 @@ export function CleaningView() {
             </section>
           ))}
         </div>
+      )}
+      {closed.length > 0 && (
+        <section className="panel">
+          <div className="panel-heading">
+            <h2>Cancelled or replaced</h2>
+            <Badge>{closed.length}</Badge>
+          </div>
+          {closed.map((t) => (
+            <div className="list-row" key={t.id}>
+              <span className="grow">
+                <strong>
+                  {data.listings.find((l) => l.id === t.listingId)?.name} ·{" "}
+                  {t.title}
+                </strong>
+                <small>
+                  {label(t.status)} {t.closedAt ? dateTime(t.closedAt) : ""} ·{" "}
+                  {TASK_REASON[t.closeReason ?? ""] ??
+                    label(t.closeReason ?? "")}
+                </small>
+              </span>
+            </div>
+          ))}
+        </section>
       )}
       <div className="calendar-note">
         <Info size={15} />
@@ -113,6 +140,13 @@ function TaskCard({ task: t }: { task: Task }) {
         </button>
       </div>
       <h3>{t.title}</h3>
+      {t.reviewRequired && (
+        <p className="task-review" role="note">
+          <Badge tone="attention">Needs your review</Badge>{" "}
+          {TASK_REASON[t.reviewReason ?? ""] ??
+            "The stay changed. Door-code access is withheld until you decide."}
+        </p>
+      )}
       <p className="task-date">
         <Clock size={14} />
         {dateTime(t.scheduledAt, l?.timezone)}
@@ -140,16 +174,17 @@ function TaskCard({ task: t }: { task: Task }) {
         </button>
       )}
       <div className="task-footer">
-        {["NEEDS_SCHEDULING", "ASSIGNED", "ACCEPTED"].includes(t.status) && (
-          <Button
-            onClick={() =>
-              show("The right person for the job", <AssignForm task={t} />)
-            }
-          >
-            {t.cleanerId ? "Reassign" : "Assign cleaner"}
-            <ArrowRight size={14} />
-          </Button>
-        )}
+        {["NEEDS_SCHEDULING", "ASSIGNED", "ACCEPTED"].includes(t.status) &&
+          !t.reviewRequired && (
+            <Button
+              onClick={() =>
+                show("The right person for the job", <AssignForm task={t} />)
+              }
+            >
+              {t.cleanerId ? "Reassign" : "Assign cleaner"}
+              <ArrowRight size={14} />
+            </Button>
+          )}
         {t.status === "DONE" && (
           <Button
             disabled={!t.photoId}
@@ -186,7 +221,8 @@ function TaskCard({ task: t }: { task: Task }) {
           </Button>
         )}
         {["ACCEPTED", "IN_PROGRESS"].includes(t.status) &&
-          !t.codeReleasedAt && (
+          !t.codeReleasedAt &&
+          !t.reviewRequired && (
             <Button
               onClick={async () => {
                 try {

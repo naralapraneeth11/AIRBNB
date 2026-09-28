@@ -365,8 +365,8 @@ export function Workspace({ section }: { section: string }) {
                     Private. Accountable. Yours.
                   </span>
                   <span>
-                    Calendar polls every 60–120 seconds · Platform refresh times
-                    vary.
+                    Calendars are checked about every 15 minutes (5 near a stay)
+                    · Each platform imports on its own schedule.
                   </span>
                 </footer>
               </Context.Provider>
