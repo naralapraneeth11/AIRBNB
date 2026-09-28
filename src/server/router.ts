@@ -1,7 +1,7 @@
-import { NextRequest, NextResponse, after } from "next/server";
+import { NextRequest, after } from "next/server";
 import { z, ZodError } from "zod";
 import { createHmac } from "node:crypto";
-import { db, tenant, lock, type Context } from "./db";
+import { db, tenant, lock, ensureDatabaseSafety, type Context } from "./db";
 import {
   requireHost,
   currentContext,
@@ -23,99 +23,39 @@ import {
   unseal,
   hash,
   blind,
-  randomToken,
   equal,
   passwordHash,
   passwordMatches,
 } from "./crypto";
 import { audit, notify, event } from "./audit";
 import * as V from "./validation";
-import {
-  bookingDTO,
-  listingDTO,
-  blockDates,
-  calendarFeed,
-  exportLink,
-  reconcileListingConflicts,
-  createDirectBooking,
-} from "./services/calendar";
+import { listingDTO } from "./services/listings";
 import {
   assignTask,
   transitionTask,
   cleanerJob,
   cleanerJobs,
-  createTurnover,
+  turnoverStanding,
 } from "./services/cleaning";
 import { inbound, reply } from "./services/messaging";
-import { drainWorkspace, runCron } from "./services/jobs";
+import { dispatchOutbox, runTick } from "./services/jobs";
 import { uploadPhoto, readPhoto } from "./services/storage";
 import { insights } from "./services/insights";
 import { command } from "./services/commands";
 import { allowedHost } from "./integrations/http";
 import { reportError } from "./observability";
-import { dateOnly, dayAdd, overlaps } from "@/lib/domain";
-async function bytes(request: Request, limit: number) {
-  const reader = request.body?.getReader();
-  if (!reader) return Buffer.alloc(0);
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel();
-      throw new AppError(413, "BODY_LIMIT", "Request is too large.");
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks);
-}
-async function formBody(request: Request) {
-  const data = await bytes(request, 4 * 1024 * 1024 + 65536);
-  return new Response(new Uint8Array(data), {
-    headers: { "Content-Type": request.headers.get("content-type") || "" },
-  }).formData();
-}
-async function body(request: Request, limit = 64000) {
-  const text = (await bytes(request, limit)).toString("utf8");
-  ensure(
-    Buffer.byteLength(text) <= limit,
-    413,
-    "BODY_LIMIT",
-    "Request is too large.",
-  );
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new AppError(400, "INVALID_JSON", "Request must contain valid JSON.");
-  }
-}
-function range(request: Request) {
-  const q = new URL(request.url).searchParams;
-  const from = V.date.parse(q.get("from") || dateOnly(dayAdd(new Date(), -30))),
-    to = V.date.parse(q.get("to") || dateOnly(dayAdd(new Date(), 90)));
-  ensure(
-    to > from && (+new Date(to) - +new Date(from)) / 86400000 <= 731,
-    400,
-    "RANGE",
-    "Select a range of up to two years.",
-  );
-  return {
-    from: new Date(from + "T00:00:00Z"),
-    to: new Date(to + "T00:00:00Z"),
-  };
-}
-function json(value: unknown, status = 200) {
-  return NextResponse.json(value, {
-    status,
-    headers: { "Cache-Control": "private, no-store" },
-  });
-}
+import { dayAdd } from "@/lib/domain";
+import { body, bytes, formBody, json, range } from "./http";
+import { calendarRoutes } from "./routes/calendar";
+import { operationsHealth } from "./routes/operations";
+import { createConnection } from "./calendar/actions";
+import { propertySettingsChanged } from "./calendar/commit";
+import { connectionDTO, reservationDTO } from "./calendar/dto";
+import { serveExport } from "./calendar/serve";
 function kick(workspaceId: string) {
   after(async () => {
     try {
-      await drainWorkspace(workspaceId, 20000);
+      await dispatchOutbox(workspaceId, 20000);
     } catch (error) {
       reportError(error, "background-dispatch");
     }
@@ -131,9 +71,12 @@ export async function handle(request: NextRequest) {
     method = request.method;
   try {
     if (method === "GET" && path[0] === "health") {
+      if (path[1] === "operations") return operationsHealth(request);
       await db.$queryRaw`SELECT 1`;
       return json({ status: "ok", database: "reachable" });
     }
+    // SEC 04: refuse to touch data from an incompatible environment.
+    await ensureDatabaseSafety();
     if (path[0] === "cron") {
       ensure(
         equal(
@@ -144,7 +87,7 @@ export async function handle(request: NextRequest) {
         "UNAUTHORIZED",
         "Invalid scheduler authorization.",
       );
-      return json(await runCron());
+      return json(await runTick("CRON_HTTP"));
     }
     if (path[0] === "webhooks" && path[1] === "messages" && method === "POST") {
       const raw = (await bytes(request, 64000)).toString("utf8");
@@ -202,26 +145,22 @@ export async function handle(request: NextRequest) {
       return json({ id: result.id }, 202);
     }
     if (
-      method === "GET" &&
+      (method === "GET" || method === "HEAD") &&
       path[0] === "listings" &&
       path[2] === "export.ics"
     ) {
       const q = request.nextUrl.searchParams,
         workspaceId = V.id.parse(q.get("workspace")),
-        token = z.string().min(20).max(100).parse(q.get("token"));
+        token = z.string().min(20).max(100).parse(q.get("token")),
+        source = q.get("source");
       await rateLimit("feed:" + hash(token), 100, 60);
-      const feed = await calendarFeed(
-        { workspaceId, actorId: "calendar-client", role: "SYSTEM", requestId },
-        path[1],
+      return serveExport({
+        workspaceId,
+        listingId: V.id.parse(path[1]),
         token,
-        q.get("source") || undefined,
-      );
-      return new Response(feed, {
-        headers: {
-          "Content-Type": "text/calendar; charset=utf-8",
-          "Cache-Control": "private, no-store",
-          "Content-Disposition": 'inline; filename="availability.ics"',
-        },
+        connectionId: source ? V.id.parse(source) : null,
+        method,
+        ifNoneMatch: request.headers.get("if-none-match"),
       });
     }
     if (!["GET", "HEAD", "OPTIONS"].includes(method)) checkOrigin(request);
@@ -289,17 +228,13 @@ export async function handle(request: NextRequest) {
               "CODE_WITHHELD",
               "Accept the assigned job before requesting access. Your host may need to release the code while automation is paused.",
             );
-            if (t.bookingId) {
-              const b = await tx.booking.findUniqueOrThrow({
-                where: { id: t.bookingId },
-              });
-              ensure(
-                b.status === "CONFIRMED",
-                409,
-                "BOOKING_REVIEW",
-                "The reservation needs host review before access is released.",
-              );
-            }
+            const standing = await turnoverStanding(tx, ctx, t);
+            ensure(
+              standing.expected && !t.reviewRequired,
+              409,
+              "BOOKING_REVIEW",
+              "The reservation needs host review before access is released.",
+            );
             const l = await tx.listing.findUniqueOrThrow({
               where: { id: t.listingId },
             });
@@ -367,7 +302,7 @@ export async function handle(request: NextRequest) {
             workspace,
             user,
             listings,
-            sources,
+            connections,
             tasks,
             cleaners,
             settings,
@@ -381,19 +316,9 @@ export async function handle(request: NextRequest) {
               where: { workspaceId: ctx.workspaceId, archivedAt: null },
               orderBy: { createdAt: "asc" },
             }),
-            tx.syncSource.findMany({
+            tx.channelConnection.findMany({
               where: { workspaceId: ctx.workspaceId },
-              select: {
-                id: true,
-                listingId: true,
-                platform: true,
-                status: true,
-                lastSyncedAt: true,
-                lastAttemptAt: true,
-                nextPollAt: true,
-                error: true,
-                enabled: true,
-              },
+              orderBy: { createdAt: "asc" },
             }),
             tx.cleaningTask.findMany({
               where: {
@@ -436,10 +361,14 @@ export async function handle(request: NextRequest) {
             "Host viewed properties, operational tasks, structured manuals, and automation rules.",
           );
           return {
-            workspace: { id: workspace.id, name: workspace.name },
+            workspace: {
+              id: workspace.id,
+              name: workspace.name,
+              calendarMode: workspace.calendarMode,
+            },
             user: { name: user.name, role: ctx.role },
             listings: listings.map((l) => listingDTO(l, ctx)),
-            sources,
+            connections: connections.map((c) => connectionDTO(c)),
             tasks: tasks.map(({ noteEncrypted, ...t }) => ({
               ...t,
               note: decrypt(noteEncrypted, ctx.workspaceId),
@@ -477,8 +406,7 @@ export async function handle(request: NextRequest) {
           }),
         );
       if (method === "POST" && path.length === 1) {
-        const input = V.listingInput.parse(await body(request)),
-          token = randomToken();
+        const input = V.listingInput.parse(await body(request));
         return json(
           await tenant(ctx, async (tx) => {
             const l = await tx.listing.create({
@@ -491,7 +419,6 @@ export async function handle(request: NextRequest) {
                   ? encrypt(input.doorCode, ctx.workspaceId)
                   : null,
                 houseManualEncrypted: seal(input.houseManual, ctx.workspaceId),
-                exportTokenHash: hash(token),
               } as never,
             });
             await audit(
@@ -502,10 +429,13 @@ export async function handle(request: NextRequest) {
               l.id,
               "Host created a listing. Automation remains governed by workspace controls.",
             );
-            return {
-              ...listingDTO(l, ctx),
-              exportUrl: exportLink(ctx.workspaceId, l.id, token),
-            };
+            const master = await createConnection(tx, ctx, {
+              listingId: l.id,
+              platform: "OTHER",
+              url: null,
+              label: "All-channel export link",
+            });
+            return { ...listingDTO(l, ctx), exportUrl: master.exportUrl };
           }),
           201,
         );
@@ -529,7 +459,7 @@ export async function handle(request: NextRequest) {
             );
             if (input.currency !== before.currency)
               ensure(
-                (await tx.booking.count({
+                (await tx.reservation.count({
                   where: { workspaceId: ctx.workspaceId, listingId: before.id },
                 })) === 0,
                 409,
@@ -568,12 +498,14 @@ export async function handle(request: NextRequest) {
               "Host updated listing settings and structured manual.",
               { before: listingDTO(before, ctx), afterVersion: l.version },
             );
-            if (input.bufferDays !== before.bufferDays) {
-              await reconcileListingConflicts(tx, ctx, l);
-              await tx.syncSource.updateMany({
-                where: { workspaceId: ctx.workspaceId, listingId: l.id },
-                data: { nextPollAt: new Date() },
-              });
+            const buffers = input.bufferDays !== before.bufferDays;
+            const checkout =
+              input.checkoutHour !== before.checkoutHour ||
+              input.cleaningBufferHours !== before.cleaningBufferHours ||
+              input.timezone !== before.timezone;
+            if (buffers || checkout)
+              await propertySettingsChanged(tx, ctx, l, { buffers, checkout });
+            if (buffers) {
               await notify(
                 tx,
                 ctx,
@@ -607,372 +539,15 @@ export async function handle(request: NextRequest) {
             };
           }),
         );
-      if (method === "POST" && path[2] === "export-token") {
-        ownerOnly(ctx);
-        const token = randomToken();
-        return json(
-          await tenant(ctx, async (tx) => {
-            await tx.listing.update({
-              where: { id: path[1] },
-              data: { exportTokenHash: hash(token) },
-            });
-            await audit(
-              tx,
-              ctx,
-              "ROTATE",
-              "Listing",
-              path[1],
-              "Public feed capability rotated; the old master feed URL is invalid.",
-            );
-            return { url: exportLink(ctx.workspaceId, path[1], token) };
-          }),
-        );
-      }
       if (method === "POST" && path[2] === "photo") {
         const form = await formBody(request),
           file = form.get("file");
         ensure(file instanceof File, 400, "FILE_REQUIRED", "Choose a photo.");
         return json(await uploadPhoto(ctx, file, undefined, path[1]));
       }
-      if (method === "GET" && path[2] === "sync-status")
-        return json(
-          await tenant(ctx, (tx) =>
-            tx.syncSource.findMany({
-              where: { workspaceId: ctx.workspaceId, listingId: path[1] },
-              select: {
-                id: true,
-                platform: true,
-                status: true,
-                error: true,
-                lastSyncedAt: true,
-                nextPollAt: true,
-              },
-            }),
-          ),
-        );
     }
-    if (path[0] === "sources" && method === "POST") {
-      ownerOnly(ctx);
-      const input = z
-        .object({
-          listingId: V.id,
-          platform: z.enum(["AIRBNB", "VRBO", "EXPEDIA", "BOOKING"]),
-          url: z.url().max(2000),
-        })
-        .parse(await body(request));
-      const u = new URL(input.url);
-      ensure(
-        u.protocol === "https:" &&
-          !u.username &&
-          !u.password &&
-          (!u.port || u.port === "443") &&
-          allowedHost(u.hostname, process.env.ICAL_ALLOWED_HOSTS || ""),
-        400,
-        "URL_BLOCKED",
-        "Use an HTTPS iCal URL on an allowed provider domain.",
-      );
-      const token = randomToken();
-      const result = await tenant(ctx, async (tx) => {
-        ensure(
-          await tx.listing.findFirst({
-            where: { id: input.listingId, workspaceId: ctx.workspaceId },
-          }),
-          404,
-          "NOT_FOUND",
-          "Listing not found.",
-        );
-        const s = await tx.syncSource.upsert({
-          where: {
-            workspaceId_listingId_platform_direction: {
-              workspaceId: ctx.workspaceId,
-              listingId: input.listingId,
-              platform: input.platform,
-              direction: "IMPORT",
-            },
-          },
-          create: {
-            workspaceId: ctx.workspaceId,
-            listingId: input.listingId,
-            platform: input.platform,
-            urlEncrypted: encrypt(input.url, ctx.workspaceId),
-            tokenHash: hash(token),
-          },
-          update: {
-            urlEncrypted: encrypt(input.url, ctx.workspaceId),
-            tokenHash: hash(token),
-            enabled: true,
-            nextPollAt: new Date(),
-            etag: null,
-            lastModified: null,
-          },
-        });
-        await audit(
-          tx,
-          ctx,
-          "CONNECT",
-          "SyncSource",
-          s.id,
-          "Import feed configured; channel-specific export excludes its origin reservations.",
-        );
-        return {
-          id: s.id,
-          exportUrl: exportLink(ctx.workspaceId, input.listingId, token, s.id),
-        };
-      });
-      kick(ctx.workspaceId);
-      return json(result);
-    }
-    if (path[0] === "sync" && method === "POST") {
-      await tenant(ctx, (tx) =>
-        tx.syncSource.updateMany({
-          where: { workspaceId: ctx.workspaceId, enabled: true },
-          data: { nextPollAt: new Date() },
-        }),
-      );
-      kick(ctx.workspaceId);
-      return json({ status: "queued" }, 202);
-    }
-    if (path[0] === "calendar" && method === "GET") {
-      const r = range(request);
-      return json(
-        await tenant(ctx, async (tx) => {
-          const rows = await tx.booking.findMany({
-            where: {
-              workspaceId: ctx.workspaceId,
-              startDate: { lt: dayAdd(r.to, 14) },
-              endDate: { gt: dayAdd(r.from, -14) },
-              status: { notIn: ["CANCELLED", "DISMISSED"] },
-            },
-            orderBy: { startDate: "asc" },
-            take: 2000,
-          });
-          await audit(
-            tx,
-            ctx,
-            "READ",
-            "Booking",
-            null,
-            "Host read calendar reservations and decrypted guest names.",
-            { from: dateOnly(r.from), to: dateOnly(r.to), count: rows.length },
-          );
-          return {
-            bookings: rows.map((b) => bookingDTO(b, ctx)),
-            capped: rows.length === 2000,
-          };
-        }),
-      );
-    }
-    if (path[0] === "calendar" && path[1] === "block" && method === "POST") {
-      const input = V.blockInput.parse(await body(request));
-      return json(await tenant(ctx, (tx) => blockDates(tx, ctx, input)), 201);
-    }
-    if (path[0] === "bookings") {
-      if (method === "POST" && path.length === 1) {
-        const input = V.directBookingInput.parse(await body(request));
-        return json(
-          await tenant(ctx, (tx) => createDirectBooking(tx, ctx, input)),
-          201,
-        );
-      }
-      if (method === "GET") {
-        const r = range(request);
-        return json(
-          await tenant(ctx, async (tx) => {
-            const rows = await tx.booking.findMany({
-              where: {
-                workspaceId: ctx.workspaceId,
-                startDate: { lt: r.to },
-                endDate: { gt: r.from },
-              },
-              orderBy: { startDate: "asc" },
-              take: 1000,
-            });
-            await audit(
-              tx,
-              ctx,
-              "READ",
-              "Booking",
-              null,
-              "Host read guest booking details.",
-            );
-            return rows.map((b) => bookingDTO(b, ctx));
-          }),
-        );
-      }
-      if (method === "PATCH" && path.length === 2) {
-        const input = z
-          .object({
-            guestName: z.string().max(200),
-            guestContact: z.string().max(320),
-            price: z.number().nonnegative().max(999999999).nullable(),
-            version: z.number().int(),
-          })
-          .parse(await body(request));
-        return json(
-          await tenant(ctx, async (tx) => {
-            await lock(tx, "booking:" + path[1]);
-            const b = await tx.booking.findFirst({
-              where: { id: path[1], workspaceId: ctx.workspaceId },
-            });
-            ensure(
-              b && b.version === input.version,
-              409,
-              "VERSION_CONFLICT",
-              "Booking changed. Refresh and try again.",
-            );
-            const updated = await tx.booking.update({
-              where: { id: b.id },
-              data: {
-                guestNameEncrypted: encrypt(input.guestName, ctx.workspaceId),
-                guestContactEncrypted: encrypt(
-                  input.guestContact,
-                  ctx.workspaceId,
-                ),
-                guestHash: input.guestContact
-                  ? blind(input.guestContact)
-                  : null,
-                price: input.price,
-                version: { increment: 1 },
-              },
-            });
-            await audit(
-              tx,
-              ctx,
-              "ENRICH",
-              "Booking",
-              b.id,
-              "Host added guest details and price; iCal feeds often do not provide these fields.",
-            );
-            return bookingDTO(updated, ctx);
-          }),
-        );
-      }
-      if (method === "POST" && path[2] === "resolve-conflict") {
-        const input = z
-          .object({
-            action: z.enum([
-              "KEEP",
-              "DISMISS",
-              "REMOVE_BLOCK",
-              "CONFIRM_REMOVAL",
-            ]),
-            reason: z.string().min(10).max(1000),
-            version: z.number().int(),
-            externalResolutionConfirmed: z.boolean(),
-          })
-          .parse(await body(request));
-        return json(
-          await tenant(ctx, async (tx) => {
-            const initial = await tx.booking.findFirst({
-              where: { id: path[1], workspaceId: ctx.workspaceId },
-            });
-            ensure(initial, 404, "NOT_FOUND", "Booking not found.");
-            await lock(tx, "listing:" + initial.listingId);
-            const b = await tx.booking.findUniqueOrThrow({
-              where: { id: initial.id },
-            });
-            ensure(
-              b.version === input.version,
-              409,
-              "VERSION_CONFLICT",
-              "Booking changed. Refresh and try again.",
-            );
-            if (input.action === "REMOVE_BLOCK")
-              ensure(
-                b.kind === "BLOCK",
-                400,
-                "NOT_BLOCK",
-                "Only a manual block can be removed.",
-              );
-            else {
-              ensure(
-                b.kind === "RESERVATION",
-                400,
-                "NOT_RESERVATION",
-                "Use remove block for a manual date block.",
-              );
-              if (input.action === "CONFIRM_REMOVAL")
-                ensure(
-                  b.status === "PENDING_REMOVAL",
-                  409,
-                  "REMOVAL_STATE",
-                  "Only a reservation missing from its feed can be confirmed removed.",
-                );
-              ensure(
-                input.externalResolutionConfirmed,
-                400,
-                "CONFIRM_REQUIRED",
-                "Confirm the outcome was handled with the platform and guest.",
-              );
-            }
-            let status =
-              input.action === "KEEP"
-                ? "CONFIRMED"
-                : input.action === "REMOVE_BLOCK"
-                  ? "CANCELLED"
-                  : "DISMISSED";
-            if (input.action === "KEEP") {
-              const l = await tx.listing.findUniqueOrThrow({
-                where: { id: b.listingId },
-              });
-              const others = await tx.booking.findMany({
-                where: {
-                  workspaceId: ctx.workspaceId,
-                  listingId: b.listingId,
-                  id: { not: b.id },
-                  status: { in: ["CONFIRMED", "CONFLICT", "PENDING_REMOVAL"] },
-                },
-              });
-              for (const other of others.filter((o) =>
-                overlaps(b, o, l.bufferDays),
-              ))
-                await tx.booking.update({
-                  where: { id: other.id },
-                  data: {
-                    status:
-                      other.status === "PENDING_REMOVAL"
-                        ? "PENDING_REMOVAL"
-                        : "CONFLICT",
-                    conflictWithId: b.id,
-                    priorityOverride: false,
-                    version: { increment: 1 },
-                  },
-                });
-            }
-            const updated = await tx.booking.update({
-              where: { id: b.id },
-              data: {
-                status,
-                priorityOverride: input.action === "KEEP",
-                conflictWithId: null,
-                version: { increment: 1 },
-              },
-            });
-            await reconcileListingConflicts(
-              tx,
-              ctx,
-              await tx.listing.findUniqueOrThrow({
-                where: { id: b.listingId },
-              }),
-            );
-            await event(
-              tx,
-              ctx,
-              "CONFLICT_RESOLVED",
-              b.id,
-              `resolve:${b.id}:${updated.version}`,
-              { action: input.action },
-            );
-            await audit(tx, ctx, "RESOLVE", "Booking", b.id, input.reason, {
-              beforeStatus: b.status,
-              afterStatus: status,
-              externalResolutionConfirmed: input.externalResolutionConfirmed,
-            });
-            return bookingDTO(updated, ctx);
-          }),
-        );
-      }
-    }
+    const calendar = await calendarRoutes(request, path, method, ctx);
+    if (calendar) return calendar;
     if (path[0] === "cleaning-tasks") {
       if (method === "GET")
         return json(
@@ -1077,17 +652,13 @@ export async function handle(request: NextRequest) {
               "ACCEPT_REQUIRED",
               "The cleaner must accept first.",
             );
-            if (task.bookingId) {
-              const booking = await tx.booking.findFirst({
-                where: { workspaceId: ctx.workspaceId, id: task.bookingId },
-              });
-              ensure(
-                booking?.status === "CONFIRMED",
-                409,
-                "BOOKING_REVIEW",
-                "Resolve the reservation before releasing access.",
-              );
-            }
+            const standing = await turnoverStanding(tx, ctx, task);
+            ensure(
+              standing.expected && !task.reviewRequired,
+              409,
+              "BOOKING_REVIEW",
+              "Resolve the reservation before releasing access.",
+            );
             await tx.cleaningTask.update({
               where: { id: task.id },
               data: { codeReleasedAt: new Date() },
@@ -1163,8 +734,8 @@ export async function handle(request: NextRequest) {
             });
             const rows = [];
             for (const t of threads) {
-              const booking = await tx.booking.findUniqueOrThrow({
-                where: { id: t.bookingId },
+              const reservation = await tx.reservation.findUniqueOrThrow({
+                where: { id: t.reservationId },
               });
               const latest = await tx.message.findFirst({
                 where: { threadId: t.id, workspaceId: ctx.workspaceId },
@@ -1173,7 +744,7 @@ export async function handle(request: NextRequest) {
               rows.push({
                 ...t,
                 guestName:
-                  decrypt(booking.guestNameEncrypted, ctx.workspaceId) ||
+                  decrypt(reservation.guestNameEncrypted, ctx.workspaceId) ||
                   "Guest",
                 preview: latest
                   ? decrypt(latest.bodyEncrypted, ctx.workspaceId).slice(0, 140)
@@ -1198,19 +769,19 @@ export async function handle(request: NextRequest) {
               where: { id: path[1], workspaceId: ctx.workspaceId },
             });
             ensure(t, 404, "NOT_FOUND", "Conversation not found.");
-            const booking = await tx.booking.findUniqueOrThrow({
-                where: { id: t.bookingId },
+            const reservation = await tx.reservation.findUniqueOrThrow({
+                where: { id: t.reservationId },
               }),
               messages = await tx.message.findMany({
                 where: { workspaceId: ctx.workspaceId, threadId: t.id },
                 orderBy: { createdAt: "asc" },
                 take: 500,
               });
-            const pastStays = booking.guestHash
-              ? await tx.booking.count({
+            const pastStays = reservation.guestHash
+              ? await tx.reservation.count({
                   where: {
                     workspaceId: ctx.workspaceId,
-                    guestHash: booking.guestHash,
+                    guestHash: reservation.guestHash,
                     endDate: { lt: new Date() },
                     status: "CONFIRMED",
                   },
@@ -1222,11 +793,11 @@ export async function handle(request: NextRequest) {
               "READ",
               "Thread",
               t.id,
-              "Host read guest conversation, booking context, and repeat-stay count.",
+              "Host read guest conversation, reservation context, and repeat-stay count.",
             );
             return {
               thread: t,
-              booking: bookingDTO(booking, ctx),
+              reservation: reservationDTO(reservation, ctx),
               pastStays,
               messages: messages.map(({ bodyEncrypted, ...m }) => ({
                 ...m,
@@ -1584,7 +1155,7 @@ export async function handle(request: NextRequest) {
             path[1],
             "Host opened action provenance; sensitive prompt details remain encrypted until explicitly requested.",
           );
-          return rows.map(({ detailEncrypted, ...r }) => r);
+          return rows.map(({ detailEncrypted: _detail, ...r }) => r);
         }),
       );
     if (path[0] === "audit" && path[2] === "detail" && method === "POST") {
@@ -1925,7 +1496,12 @@ export async function handle(request: NextRequest) {
       );
     if (error instanceof AppError)
       return json(
-        { error: error.message, code: error.code, requestId },
+        {
+          error: error.message,
+          code: error.code,
+          ...(error.details === undefined ? {} : { details: error.details }),
+          requestId,
+        },
         error.status,
       );
     reportError(error, requestId);

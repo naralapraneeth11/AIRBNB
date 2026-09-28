@@ -3,6 +3,8 @@ export class AppError extends Error {
     public status: number,
     public code: string,
     message: string,
+    /** Structured, non-sensitive context returned to the client. */
+    public details?: unknown,
   ) {
     super(message);
   }

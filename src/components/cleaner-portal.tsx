@@ -9,7 +9,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { api, label, dateTime, APIError } from "@/lib/client";
-import { Button, Badge, ErrorBox, Empty, Field } from "./ui";
+import { Button, Badge, ErrorBox, Empty } from "./ui";
 type Job = {
   id: string;
   title: string;
@@ -19,6 +19,10 @@ type Job = {
   version: number;
   photoId: string | null;
   codeAvailable: boolean;
+  /** CLEAN 03: cancelled or replaced; the cleaner sees why, not an error. */
+  closed: boolean;
+  reviewRequired: boolean;
+  notice: string | null;
   listing: { name: string; address: string; timezone: string };
   note: string;
 };
@@ -162,7 +166,13 @@ export function CleanerPortal() {
               <MapPin size={18} />
               <span>{job.listing.address}</span>
             </div>
-            {job.status === "ASSIGNED" ? (
+            {job.notice && (
+              <p className="callout" role="status">
+                {job.notice}
+              </p>
+            )}
+            {job.closed || job.reviewRequired ? null : job.status ===
+              "ASSIGNED" ? (
               <div className="cleaner-actions">
                 <Button
                   primary
@@ -219,53 +229,55 @@ export function CleanerPortal() {
                 )}
               </div>
             )}
-            {["IN_PROGRESS", "DONE"].includes(job.status) && (
-              <>
-                <input
-                  ref={file}
-                  type="file"
-                  accept="image/jpeg,image/png,image/webp"
-                  hidden
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) {
-                      const form = new FormData();
-                      form.set("file", f);
-                      action(() =>
-                        api("cleaner/photo", { method: "POST", data: form }),
-                      );
-                    }
-                  }}
-                />
-                <Button disabled={busy} onClick={() => file.current?.click()}>
-                  <Camera size={16} />
-                  {job.photoId
-                    ? "Replace verification photo"
-                    : "Upload cleaning photo"}
-                </Button>
-                {job.photoId && (
-                  <img
-                    className="proof-image"
-                    src={"/api/assets/" + job.photoId}
-                    alt="Your uploaded cleaning photo"
+            {!job.closed &&
+              !job.reviewRequired &&
+              ["IN_PROGRESS", "DONE"].includes(job.status) && (
+                <>
+                  <input
+                    ref={file}
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    hidden
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) {
+                        const form = new FormData();
+                        form.set("file", f);
+                        action(() =>
+                          api("cleaner/photo", { method: "POST", data: form }),
+                        );
+                      }
+                    }}
                   />
-                )}
-                {job.status === "IN_PROGRESS" && (
-                  <Button
-                    primary
-                    disabled={busy || !job.photoId}
-                    onClick={() => transition("DONE")}
-                  >
-                    <Check size={16} />
-                    Finish job
+                  <Button disabled={busy} onClick={() => file.current?.click()}>
+                    <Camera size={16} />
+                    {job.photoId
+                      ? "Replace verification photo"
+                      : "Upload cleaning photo"}
                   </Button>
-                )}
-                <small>
-                  Upload a photo before finishing. Your host verifies the
-                  result.
-                </small>
-              </>
-            )}
+                  {job.photoId && (
+                    <img
+                      className="proof-image"
+                      src={"/api/assets/" + job.photoId}
+                      alt="Your uploaded cleaning photo"
+                    />
+                  )}
+                  {job.status === "IN_PROGRESS" && (
+                    <Button
+                      primary
+                      disabled={busy || !job.photoId}
+                      onClick={() => transition("DONE")}
+                    >
+                      <Check size={16} />
+                      Finish job
+                    </Button>
+                  )}
+                  <small>
+                    Upload a photo before finishing. Your host verifies the
+                    result.
+                  </small>
+                </>
+              )}
             {job.status === "VERIFIED" && (
               <div className="verified-state">
                 <ShieldCheck />

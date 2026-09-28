@@ -10,6 +10,11 @@ import {
 import { required } from "./config";
 export const randomToken = () => randomBytes(32).toString("base64url");
 export const hash = (s: string) => createHash("sha256").update(s).digest("hex");
+/** Keyed digest of an exact value (no case folding), e.g. a secret feed URL. */
+export const keyedDigest = (purpose: string, value: string) =>
+  createHmac("sha256", required("AUTH_SECRET"))
+    .update(purpose + "\u0000" + value)
+    .digest("hex");
 export const blind = (s: string) =>
   createHmac("sha256", required("AUTH_SECRET"))
     .update(s.trim().toLowerCase())
@@ -32,11 +37,21 @@ export function encrypt(value: string, scope: string) {
 }
 export function decrypt(value: string | null | undefined, scope: string) {
   if (!value) return "";
+  return decryptWithKeys(JSON.parse(required("ENCRYPTION_KEYS")), value, scope);
+}
+/** The key version a ciphertext was written with (its first segment). */
+export const keyIdOf = (value: string) => value.split(".", 1)[0];
+/**
+ * Decrypt with an explicit key map. Used by `decrypt` and by the key-escrow
+ * verification (REC 01), so both read exactly one ciphertext format.
+ */
+export function decryptWithKeys(
+  keys: Record<string, string>,
+  value: string,
+  scope: string,
+) {
   const [id, n, t, c] = value.split("."),
-    key = Buffer.from(
-      JSON.parse(required("ENCRYPTION_KEYS"))[id] || "",
-      "base64",
-    );
+    key = Buffer.from(keys[id] || "", "base64");
   const decipher = createDecipheriv(
     "aes-256-gcm",
     key,

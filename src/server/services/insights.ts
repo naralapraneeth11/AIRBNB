@@ -5,10 +5,10 @@ export async function insights(tx: Tx, ctx: Context, from: Date, to: Date) {
   const listings = await tx.listing.findMany({
     where: { workspaceId: ctx.workspaceId, archivedAt: null },
   });
-  const bookings = await tx.booking.findMany({
+  // Only reservations count as stays; owner blocks and unknown events do not.
+  const bookings = await tx.reservation.findMany({
     where: {
       workspaceId: ctx.workspaceId,
-      kind: "RESERVATION",
       status: "CONFIRMED",
       startDate: { lt: to },
       endDate: { gt: from },
@@ -44,28 +44,31 @@ export async function insights(tx: Tx, ctx: Context, from: Date, to: Date) {
       nights: [...nights],
     };
   });
-  const runs = await tx.syncRun.findMany({
-    where: { workspaceId: ctx.workspaceId, createdAt: { gte: from, lt: to } },
-    orderBy: { createdAt: "desc" },
-    take: 20000,
-  });
-  const sources = await tx.syncSource.findMany({
+  // Every scheduled or manual check records an observation (CAL 05); a check
+  // succeeded when it produced a usable, accepted result.
+  const connections = await tx.channelConnection.findMany({
     where: { workspaceId: ctx.workspaceId },
+    select: { id: true, platform: true },
   });
-  const platforms = [...new Set(sources.map((s) => s.platform))].map(
+  const observed = await tx.feedObservation.groupBy({
+    by: ["connectionId", "accepted"],
+    where: { workspaceId: ctx.workspaceId, observedAt: { gte: from, lt: to } },
+    _count: { _all: true },
+  });
+  const platforms = [...new Set(connections.map((c) => c.platform))].map(
     (platform) => {
-      const ids = sources
-          .filter((s) => s.platform === platform)
-          .map((s) => s.id),
-        rr = runs.filter((r) => ids.includes(r.sourceId));
+      const ids = new Set(
+        connections.filter((c) => c.platform === platform).map((c) => c.id),
+      );
+      const rows = observed.filter((o) => ids.has(o.connectionId));
+      const checks = rows.reduce((n, o) => n + o._count._all, 0);
+      const accepted = rows
+        .filter((o) => o.accepted)
+        .reduce((n, o) => n + o._count._all, 0);
       return {
         platform,
-        checks: rr.length,
-        uptime: rr.length
-          ? Math.round(
-              (rr.filter((r) => r.success).length / rr.length) * 1000,
-            ) / 10
-          : null,
+        checks,
+        uptime: checks ? Math.round((accepted / checks) * 1000) / 10 : null,
       };
     },
   );
@@ -109,7 +112,7 @@ export async function insights(tx: Tx, ctx: Context, from: Date, to: Date) {
     "READ",
     "Insights",
     null,
-    "Aggregated actual reservation, response, sync, and cleaning metrics. Prices unavailable from iCal remain unknown.",
+    "Aggregated actual reservation, response, calendar check, and cleaning metrics. Prices unavailable from iCal remain unknown.",
   );
   return {
     from: dateOnly(from),
@@ -134,6 +137,5 @@ export async function insights(tx: Tx, ctx: Context, from: Date, to: Date) {
         ) / 10
       : null,
     cleaningSamples: tasks.length,
-    syncSampleCapped: runs.length === 20000,
   };
 }

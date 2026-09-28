@@ -1,5 +1,7 @@
 "use client";
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useSearchParams } from "next/navigation";
+import Link from "next/link";
 import {
   ChevronLeft,
   ChevronRight,
@@ -7,45 +9,124 @@ import {
   RefreshCw,
   ShieldCheck,
   ArrowUpRight,
-  Clock,
   Info,
-  CalendarDays,
   LockKeyhole,
+  CircleHelp,
+  TriangleAlert,
+  Eye,
 } from "lucide-react";
-import Link from "next/link";
-import { useWorkspace, MutationForm } from "./workspace";
-import { api, label, localDate, dateTime, money } from "@/lib/client";
-import { freshness, dayAdd, dateOnly } from "@/lib/domain";
-import type { Booking, Source, Listing } from "@/lib/types";
+import { useWorkspace } from "./workspace";
+import { api, APIError, label, localDate, dateTime, money } from "@/lib/client";
+import { dayAdd, dateOnly } from "@/lib/domain";
+import {
+  CLASS_LABEL,
+  CONFLICT_LABEL,
+  EVIDENCE_LABEL,
+  FLAG_EXPLANATION,
+  FLAG_LABEL,
+  HOLD_LABEL,
+  blockState,
+  blockTitle,
+  connectionStatus,
+  needsClassification,
+  needsDecision,
+  policyLabelName,
+  protective,
+  suggestedPolicyMode,
+  type Tone,
+} from "@/lib/calendar-copy";
+import { useNow } from "@/lib/use-now";
+import type { CalendarBlock, Conflict, Connection, Listing } from "@/lib/types";
 import { Button, Head, Badge, Empty, Field, ErrorBox } from "./ui";
-export function SyncDot({ source }: { source: Source }) {
-  const { data } = useWorkspace();
-  const status = freshness(
-    source.status,
-    source.lastSyncedAt,
-    Date.now(),
-    data.staleMinutes,
-  );
-  const detail = `${source.platform}: ${status === "fresh" ? "recently polled" : status === "polling" ? "polling normally" : status === "delayed" ? "poll delayed" : "needs attention"}${source.lastSyncedAt ? "; last success " + dateTime(source.lastSyncedAt) : "; never successfully polled"}. ${source.error || ""}`;
+
+const shift = (date: string, days: number) => dateOnly(dayAdd(date, days));
+const nights = (from: string, to: string) =>
+  Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
+const nightsText = (from: string, to: string) => {
+  const n = nights(from, to);
+  return `${n} night${n === 1 ? "" : "s"}`;
+};
+const TONE_DOT: Record<Tone, string> = {
+  ok: "fresh",
+  muted: "polling",
+  attention: "delayed",
+  critical: "error",
+};
+
+type Attention = {
+  blocks: CalendarBlock[];
+  conflicts: Conflict[];
+  policyQuestions: string[];
+  capped: boolean;
+};
+type Overlap = {
+  blockId: string;
+  kind: "NIGHTS" | "BUFFER";
+  classification: string;
+  startDate: string;
+  endDate: string;
+};
+type BlockHistory = {
+  type: string;
+  createdAt: string;
+  payload: { cause?: string };
+}[];
+type ReleasePreview = {
+  blockId: string;
+  revision: number;
+  nights: { startDate: string; endDate: string };
+  buffers: { before: number; after: number };
+  channels: {
+    connectionId: string;
+    platform: string;
+    label: string | null;
+    isSource: boolean;
+  }[];
+  conflicts: {
+    id: string;
+    kind: string;
+    overlapStart: string;
+    overlapEnd: string;
+  }[];
+  turnover: { id: string; status: string; cleanerId: string | null }[];
+  limits: string[];
+};
+
+/** Status dot with the honest run result as its accessible name (CAL 05). */
+export function ConnectionDot({
+  connection,
+  now,
+}: {
+  connection: Connection;
+  now: number;
+}) {
+  const status = connectionStatus(connection, now);
+  const text = `${connection.label || connection.platformName}: ${status.headline}. ${status.detail}`;
   return (
     <span
-      className={"status-dot " + status}
-      title={detail}
+      className={"status-dot " + TONE_DOT[status.tone]}
+      title={text}
       role="img"
-      aria-label={detail}
+      aria-label={text}
     />
   );
 }
+
 export function CalendarView() {
   const { data, show, toast, refresh } = useWorkspace();
+  const params = useSearchParams();
+  const now = useNow();
   const [anchor, setAnchor] = useState(localDate()),
     [mode, setMode] = useState("Month"),
     [listing, setListing] = useState("all"),
-    [bookings, setBookings] = useState<Booking[]>([]),
+    [blocks, setBlocks] = useState<CalendarBlock[]>([]),
+    [conflicts, setConflicts] = useState<Conflict[]>([]),
+    [attention, setAttention] = useState<Attention | null>(null),
     [error, setError] = useState(""),
     [loading, setLoading] = useState(true);
   const drag = useRef<string | null>(null),
-    grid = useRef<HTMLDivElement>(null);
+    grid = useRef<HTMLDivElement>(null),
+    opened = useRef(false);
   const d = new Date(anchor + "T12:00:00"),
     monthStart = new Date(d.getFullYear(), d.getMonth(), 1);
   const start =
@@ -67,20 +148,23 @@ export function CalendarView() {
   );
   const from = localDate(days[0]),
     to = localDate(new Date(days.at(-1)!.getTime() + 86400000));
-  const key =
-    data.sources.map((s) => s.lastSyncedAt).join() + data.tasks.length;
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
-    api<{ bookings: Booking[]; capped: boolean }>(
-      `calendar?from=${from}&to=${to}`,
-      { signal: controller.signal },
-    )
-      .then((r) => {
-        setBookings(r.bookings);
+    Promise.all([
+      api<{ blocks: CalendarBlock[]; conflicts: Conflict[]; capped: boolean }>(
+        `calendar?from=${from}&to=${to}`,
+        { signal: controller.signal },
+      ),
+      api<Attention>("calendar/attention", { signal: controller.signal }),
+    ])
+      .then(([range, pending]) => {
+        setBlocks(range.blocks);
+        setConflicts(range.conflicts);
+        setAttention(pending);
         setError(
-          r.capped
-            ? "This range contains more than 2,000 reservations. Select a shorter range."
+          range.capped
+            ? "This range holds more than 2,000 date ranges. Select a shorter range."
             : "",
         );
       })
@@ -89,20 +173,41 @@ export function CalendarView() {
       })
       .finally(() => setLoading(false));
     return () => controller.abort();
-  }, [from, to, key, data]);
+  }, [from, to, data]);
+  // Deep links from notifications: ?block=… and ?conflict=… (LIFE 05).
+  useEffect(() => {
+    if (opened.current) return;
+    const block = params.get("block"),
+      conflict = params.get("conflict");
+    if (block) {
+      opened.current = true;
+      show("Protected dates", <BlockDetail id={block} />, true);
+    } else if (conflict && attention) {
+      opened.current = true;
+      const c = attention.conflicts.find((x) => x.id === conflict);
+      if (c) show("Overlapping dates", <ConflictDetail conflict={c} />, true);
+      else toast("That overlap is no longer open.");
+    }
+  }, [params, attention, show, toast]);
+
   const visible = data.listings.filter(
     (l) => listing === "all" || l.id === listing,
   );
-  const relevant = bookings.filter(
+  const relevant = blocks.filter(
     (b) => listing === "all" || b.listingId === listing,
   );
-  const conflicts = relevant.filter(
-    (b) => b.status === "CONFLICT" || b.status === "PENDING_REMOVAL",
+  const conflicted = new Set(
+    conflicts.flatMap((c) => [c.blockAId, c.blockBId]),
   );
-  const openBlock = (from?: string, to?: string) =>
+  const importing = data.connections.filter((c) => c.enabled && c.importing);
+  const checkedRecently = importing.filter(
+    (c) => c.lastSuccessAt && now - Date.parse(c.lastSuccessAt) < 3_600_000,
+  ).length;
+  const decisions = (attention?.blocks ?? []).filter(needsDecision);
+  const openHold = (from?: string, to?: string) =>
     show(
-      "Make room on the calendar",
-      <BlockForm
+      "Hold dates",
+      <HoldForm
         initial={{
           listingId: listing === "all" ? data.listings[0]?.id : listing,
           from,
@@ -121,70 +226,88 @@ export function CalendarView() {
       ),
     );
   }
+  async function checkNow() {
+    try {
+      const { results } = await api<{
+        results: { status: string; reason?: string }[];
+      }>("sync", { method: "POST", data: {} });
+      const queued = results.filter((r) => r.status === "QUEUED").length;
+      toast(
+        queued
+          ? `${queued} calendar check${queued === 1 ? "" : "s"} queued. Results appear after each check runs.`
+          : (results.find((r) => r.reason)?.reason ??
+              "There is no calendar to check yet."),
+      );
+      await refresh();
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
   return (
     <>
       <Head
         title="One calendar. Every stay."
-        description="The source of truth for your properties. Every change, in view."
+        description="Which nights are protected, and why."
       >
-        <Button
-          onClick={async () => {
-            try {
-              await api("sync", { method: "POST", data: {} });
-              toast(
-                "Sync requested. Feed status updates after the poll completes.",
-              );
-              await refresh();
-            } catch (e) {
-              toast((e as Error).message);
-            }
-          }}
-        >
+        <Button onClick={checkNow} disabled={!importing.length}>
           <RefreshCw size={16} />
-          Sync now
+          Check calendars now
         </Button>
         <Button
           disabled={!data.listings.length}
-          onClick={() => show("New direct reservation", <DirectBookingForm />)}
+          onClick={() =>
+            show("New direct reservation", <DirectReservationForm />)
+          }
         >
           New reservation
         </Button>
         <Button
           primary
           disabled={!data.listings.length}
-          onClick={() => openBlock()}
+          onClick={() => openHold()}
         >
           <Plus size={16} />
-          Block dates
+          Hold dates
         </Button>
       </Head>
+      {data.workspace.calendarMode === "SHADOW" && (
+        <p className="callout shadow-banner" role="note">
+          <Eye size={16} aria-hidden="true" />
+          <span>
+            <strong>Shadow mode.</strong> New calendar decisions are recorded
+            for review. Export links, calendar alerts and turnover changes stay
+            off until this workspace goes live.
+          </span>
+        </p>
+      )}
       <section className="status-surface">
         <div>
           <ShieldCheck />
           <span>
             <strong>
-              {data.settings.paused
-                ? "A clear view. Automation on your terms."
-                : conflicts.length
-                  ? "A few dates need your attention."
-                  : "Your operations, connected."}
+              {decisions.length
+                ? `${decisions.length} date range${decisions.length === 1 ? " waits" : "s wait"} for your decision.`
+                : attention?.conflicts.length
+                  ? "Some dates overlap. Both stays remain protected."
+                  : "Protected dates, in one view."}
             </strong>
             <small>
-              {data.settings.paused
-                ? "Automation is paused. Calendar polling remains active to protect availability."
-                : "Imported dates are protected. Booking platforms refresh your export feed on their own schedule."}
+              Nothing reopens without your review. Platforms import your export
+              links on their own schedule; a check here does not confirm what a
+              platform shows.
             </small>
           </span>
         </div>
         <div className="status-summary">
           <strong>
-            {data.sources.filter((s) => s.status === "SYNCED").length}
-            <span> / {data.sources.length}</span>
+            {checkedRecently}
+            <span> / {importing.length}</span>
           </strong>
-          <small>feeds with a successful poll</small>
+          <small>calendars checked in the last hour</small>
         </div>
       </section>
       {error && <ErrorBox message={error} />}
+      {attention && <AttentionPanel attention={attention} />}
       <div className="calendar-toolbar">
         <div className="period-control">
           <Button aria-label="Previous period" onClick={() => navigate(-1)}>
@@ -229,7 +352,7 @@ export function CalendarView() {
         <section className="panel">
           <Empty
             title="Your first property starts here."
-            detail="Add a listing, connect its calendar feeds, and bring the next stay into focus."
+            detail="Add a property, connect its calendars, and bring the next stay into focus."
             action={
               <Link className="button primary" href="/properties">
                 Add a property
@@ -241,8 +364,8 @@ export function CalendarView() {
       ) : mode === "Agenda" ? (
         <section className="panel">
           <div className="panel-heading">
-            <h2>Upcoming reservations</h2>
-            <Badge>{relevant.length} stays & blocks</Badge>
+            <h2>Protected dates</h2>
+            <Badge>{relevant.length} date ranges</Badge>
           </div>
           {relevant.length ? (
             relevant.map((b) => (
@@ -250,11 +373,7 @@ export function CalendarView() {
                 className="agenda-row"
                 key={b.id}
                 onClick={() =>
-                  show(
-                    b.kind === "BLOCK" ? "Calendar block" : "Reservation",
-                    <BookingDetail booking={b} />,
-                    true,
-                  )
+                  show("Protected dates", <BlockDetail id={b.id} />, true)
                 }
               >
                 <span
@@ -265,23 +384,25 @@ export function CalendarView() {
                   }}
                 />
                 <div>
-                  <strong>{b.kind === "BLOCK" ? b.reason : b.guestName}</strong>
+                  <strong>{blockTitle(b)}</strong>
                   <p>
                     {data.listings.find((l) => l.id === b.listingId)?.name} ·{" "}
-                    {label(b.platform)}
+                    {CLASS_LABEL[b.effectiveClass]} · {label(b.platform)}
                   </p>
                 </div>
                 <span>
                   {b.startDate} → {b.endDate}
                 </span>
-                <Badge>{label(b.status)}</Badge>
+                <Badge tone={b.lifecycle === "ACTIVE" ? "" : "attention"}>
+                  {blockState(b, now)}
+                </Badge>
                 <ArrowUpRight size={16} />
               </button>
             ))
           ) : (
             <Empty
               title="Room for what’s next."
-              detail="Reservations will appear here after a successful calendar import."
+              detail="Dates appear here after a calendar check or when you hold them."
             />
           )}
         </section>
@@ -299,7 +420,7 @@ export function CalendarView() {
             className={"calendar-grid " + (mode === "Week" ? "week" : "")}
             ref={grid}
             role="grid"
-            aria-label="Master calendar"
+            aria-label="Protected dates by property"
             onKeyDown={(e) => {
               const buttons = Array.from(
                 grid.current?.querySelectorAll<HTMLButtonElement>(
@@ -346,98 +467,32 @@ export function CalendarView() {
                     if (drag.current && drag.current !== iso) {
                       const a = drag.current;
                       drag.current = null;
-                      openBlock(
-                        a < iso ? a : iso,
-                        dateOnly(dayAdd(a > iso ? a : iso, 1)),
-                      );
+                      openHold(a < iso ? a : iso, shift(a > iso ? a : iso, 1));
                     } else drag.current = null;
                   }}
                 >
                   <button
                     className="day-number"
-                    aria-label={`Block dates beginning ${date.toLocaleDateString()}`}
-                    onClick={() => openBlock(iso, dateOnly(dayAdd(iso, 1)))}
+                    aria-label={`Hold dates beginning ${date.toLocaleDateString()}`}
+                    onClick={() => openHold(iso, shift(iso, 1))}
                   >
                     {date.getDate()}
                   </button>
-                  {visible.map((l) => {
-                    const rows = relevant.filter(
-                      (b) =>
-                        b.listingId === l.id &&
-                        b.startDate <= iso &&
-                        b.endDate > iso,
-                    );
-                    const buffered =
-                      !rows.length &&
-                      relevant.some(
-                        (b) =>
-                          b.listingId === l.id &&
-                          ((iso >=
-                            dateOnly(dayAdd(b.startDate, -l.bufferDays)) &&
-                            iso < b.startDate) ||
-                            (iso >= b.endDate &&
-                              iso < dateOnly(dayAdd(b.endDate, l.bufferDays)))),
-                      );
-                    return (
-                      <div className="listing-day" key={l.id}>
-                        {rows.map((b) => (
-                          <button
-                            key={b.id}
-                            className={
-                              "calendar-booking " +
-                              (["CONFLICT", "PENDING_REMOVAL"].includes(
-                                b.status,
-                              )
-                                ? "conflict"
-                                : "")
-                            }
-                            style={
-                              {
-                                "--listing-color": l.color,
-                              } as React.CSSProperties
-                            }
-                            onClick={() =>
-                              show(
-                                "Reservation details",
-                                <BookingDetail booking={b} />,
-                                true,
-                              )
-                            }
-                            title={`${l.name} · ${b.guestName} · ${label(b.platform)} · ${label(b.status)}`}
-                          >
-                            <span className="platform-icon">
-                              {b.kind === "BLOCK" ? (
-                                <LockKeyhole size={10} />
-                              ) : (
-                                b.platform.slice(0, 1)
-                              )}
-                            </span>
-                            <span>
-                              {b.kind === "BLOCK" ? b.reason : b.guestName}
-                            </span>
-                            {b.status === "CONFLICT" && <Info size={11} />}
-                          </button>
-                        ))}
-                        {buffered && (
-                          <span
-                            className="calendar-buffer"
-                            title={`${l.name} · ${l.bufferDays} protected buffer day(s)`}
-                          >
-                            Buffer
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })}
-                  <div className="day-sync" aria-label="Calendar source health">
-                    {data.sources
-                      .filter(
-                        (s) =>
-                          s.enabled &&
-                          visible.some((l) => l.id === s.listingId),
-                      )
-                      .map((s) => (
-                        <SyncDot key={s.id} source={s} />
+                  {visible.map((l) => (
+                    <DayCell
+                      key={l.id}
+                      listing={l}
+                      iso={iso}
+                      blocks={relevant}
+                      conflicted={conflicted}
+                      now={now}
+                    />
+                  ))}
+                  <div className="day-sync" aria-label="Calendar check results">
+                    {importing
+                      .filter((c) => visible.some((l) => l.id === c.listingId))
+                      .map((c) => (
+                        <ConnectionDot key={c.id} connection={c} now={now} />
                       ))}
                   </div>
                 </div>
@@ -451,6 +506,15 @@ export function CalendarView() {
                 {l.name}
               </span>
             ))}
+            <span>
+              <LockKeyhole size={11} aria-hidden="true" /> Your hold
+            </span>
+            <span>
+              <CircleHelp size={11} aria-hidden="true" /> Unknown
+            </span>
+            <span>
+              <TriangleAlert size={11} aria-hidden="true" /> Needs your decision
+            </span>
             <span className="buffer-key">▨ Buffer days</span>
           </div>
         </section>
@@ -458,97 +522,1295 @@ export function CalendarView() {
       <div className="calendar-note">
         <Info size={15} />
         <p>
-          Drag across dates to block a range, or use the date buttons and arrow
-          keys. Imported calendars often omit names and prices; missing details
-          stay marked as unavailable.
+          Drag across dates to hold a range, or use the date buttons and arrow
+          keys. Departure dates are exclusive: a stay from the 14th to the 17th
+          protects three nights. Calendars often omit names and prices; missing
+          details stay marked as unavailable.
         </p>
       </div>
-      {conflicts.length > 0 && (
-        <section className="panel attention-panel">
-          <div className="panel-heading">
-            <h2>Resolve before opening these dates</h2>
-            <Badge>{conflicts.length} to review</Badge>
-          </div>
-          {conflicts.map((b) => (
-            <button
-              className="list-row"
-              key={b.id}
-              onClick={() =>
-                show("Review reservation", <BookingDetail booking={b} />, true)
-              }
-            >
-              <Info />
-              <span className="grow">
-                <strong>
-                  {data.listings.find((l) => l.id === b.listingId)?.name}
-                </strong>
-                <small>
-                  {b.startDate} → {b.endDate} · {label(b.status)}
-                </small>
-              </span>
-              <ArrowUpRight size={16} />
-            </button>
-          ))}
-        </section>
-      )}
       <section className="panel source-health">
         <div className="panel-heading">
-          <h2>Sync, without the guesswork.</h2>
-          <span className="muted">Your last successful imports</span>
+          <h2>Calendar checks</h2>
+          <span className="muted">What each source showed when checked</span>
         </div>
-        {data.sources.length ? (
-          data.sources.map((s) => (
-            <div className="list-row" key={s.id}>
-              <SyncDot source={s} />
-              <div className="grow">
-                <strong>
-                  {data.listings.find((l) => l.id === s.listingId)?.name}{" "}
-                  <span className="muted">/ {label(s.platform)}</span>
-                </strong>
-                <small>
-                  {s.lastSyncedAt
-                    ? "Last successful poll " + dateTime(s.lastSyncedAt)
-                    : "Waiting for the first successful poll"}
-                </small>
-                {s.error && <p>{s.error}</p>}
-              </div>
-              <Badge>{label(s.status)}</Badge>
-            </div>
-          ))
+        {importing.length ? (
+          importing.map((c) => {
+            const status = connectionStatus(c, now);
+            return (
+              <Link
+                className="list-row"
+                key={c.id}
+                href={"/properties?connection=" + c.id}
+              >
+                <ConnectionDot connection={c} now={now} />
+                <div className="grow">
+                  <strong>
+                    {data.listings.find((l) => l.id === c.listingId)?.name}{" "}
+                    <span className="muted">/ {c.label || c.platformName}</span>
+                  </strong>
+                  <small>{status.detail}</small>
+                </div>
+                <Badge
+                  tone={
+                    status.tone === "critical" || status.tone === "attention"
+                      ? "attention"
+                      : ""
+                  }
+                >
+                  {status.headline}
+                </Badge>
+              </Link>
+            );
+          })
         ) : (
           <p className="panel-pad muted">
-            Connect an iCal feed from a property’s channel settings.
+            Connect a calendar from a property’s channel settings.
           </p>
         )}
       </section>
     </>
   );
 }
-export function BlockForm({
-  initial = {},
+
+function DayCell({
+  listing: l,
+  iso,
+  blocks,
+  conflicted,
+  now,
 }: {
-  initial?: { listingId?: string; from?: string; to?: string };
+  listing: Listing;
+  iso: string;
+  blocks: CalendarBlock[];
+  conflicted: Set<string>;
+  now: number;
 }) {
-  const { data } = useWorkspace();
-  const id = useRef(crypto.randomUUID());
+  const { show } = useWorkspace();
+  const rows = blocks.filter(
+    (b) => b.listingId === l.id && b.startDate <= iso && b.endDate > iso,
+  );
+  const buffered =
+    !rows.some(protective) &&
+    blocks.some(
+      (b) =>
+        b.listingId === l.id &&
+        protective(b) &&
+        ((iso >= shift(b.startDate, -b.buffer.before) && iso < b.startDate) ||
+          (iso >= b.endDate && iso < shift(b.endDate, b.buffer.after))),
+    );
   return (
-    <MutationForm
-      path="calendar/block"
-      label="Confirm block"
+    <div className="listing-day">
+      {rows.map((b) => {
+        const title = blockTitle(b);
+        const name = `${l.name}: ${title}, ${CLASS_LABEL[b.effectiveClass]}, ${blockState(b, now)}, ${b.startDate} to ${b.endDate}${conflicted.has(b.id) ? ", overlaps other dates" : ""}`;
+        return (
+          <button
+            key={b.id}
+            className={
+              "calendar-booking" +
+              (conflicted.has(b.id) ? " conflict" : "") +
+              (b.lifecycle === "AWAITING_DECISION" ? " awaiting" : "") +
+              (b.lifecycle === "RELEASED" ? " released" : "") +
+              (b.effectiveClass === "UNKNOWN" ? " unknown" : "")
+            }
+            style={{ "--listing-color": l.color } as React.CSSProperties}
+            onClick={() =>
+              show("Protected dates", <BlockDetail id={b.id} />, true)
+            }
+            title={name}
+            aria-label={name}
+          >
+            <span className="platform-icon" aria-hidden="true">
+              {b.lifecycle === "AWAITING_DECISION" ? (
+                <TriangleAlert size={10} />
+              ) : b.identityKind === "MANUAL" ? (
+                <LockKeyhole size={10} />
+              ) : b.effectiveClass === "UNKNOWN" ? (
+                <CircleHelp size={10} />
+              ) : (
+                b.platform.slice(0, 1)
+              )}
+            </span>
+            <span>{title}</span>
+          </button>
+        );
+      })}
+      {buffered && (
+        <span
+          className="calendar-buffer"
+          title={`${l.name}: buffer day around protected dates`}
+        >
+          Buffer
+        </span>
+      )}
+    </div>
+  );
+}
+
+const LISTED = 10;
+const lowerFirst = (text: string) =>
+  text.charAt(0).toLowerCase() + text.slice(1);
+const flagsText = (b: CalendarBlock) =>
+  b.reviewFlags.map((f) => lowerFirst(FLAG_LABEL[f] ?? label(f))).join(", ");
+
+/** Today's questions (CLASS 02, LIFE 01, CONFLICT 01), whatever month shows. */
+function AttentionPanel({ attention }: { attention: Attention }) {
+  const { data, show } = useWorkspace();
+  const decisions = attention.blocks.filter(needsDecision);
+  const questions = data.connections.filter((c) =>
+    attention.policyQuestions.includes(c.id),
+  );
+  const unknown = attention.blocks.filter(
+    (b) =>
+      needsClassification(b) &&
+      !needsDecision(b) &&
+      !attention.policyQuestions.includes(b.connectionId ?? ""),
+  );
+  const flagged = attention.blocks.filter(
+    (b) =>
+      b.reviewFlags.length > 0 && !needsDecision(b) && !needsClassification(b),
+  );
+  const count =
+    decisions.length +
+    questions.length +
+    unknown.length +
+    flagged.length +
+    attention.conflicts.length;
+  if (!count) return null;
+  const property = (id: string) =>
+    data.listings.find((l) => l.id === id)?.name ?? "A property";
+  const row = (
+    key: string,
+    icon: ReactNode,
+    title: string,
+    detail: string,
+    open: () => void,
+  ) => (
+    <button className="list-row" key={key} onClick={open}>
+      {icon}
+      <span className="grow">
+        <strong>{title}</strong>
+        <small>{detail}</small>
+      </span>
+      <ArrowUpRight size={16} />
+    </button>
+  );
+  return (
+    <section className="panel attention-panel" aria-labelledby="attention">
+      <div className="panel-heading">
+        <h2 id="attention">Needs your decision</h2>
+        <Badge tone="attention">{count} open</Badge>
+      </div>
+      {decisions.map((b) =>
+        row(
+          b.id,
+          <TriangleAlert />,
+          `${property(b.listingId)}: ${b.decisionReason === "CANCELLATION" ? "a stay was cancelled at its source" : "a stay is no longer in its calendar"}`,
+          `${b.startDate} → ${b.endDate} · ${nightsText(b.startDate, b.endDate)} stay protected until you decide.`,
+          () => show("Protected dates", <BlockDetail id={b.id} />, true),
+        ),
+      )}
+      {questions.map((c) =>
+        row(
+          c.id,
+          <CircleHelp />,
+          `How should ${c.label || c.platformName} blocks count for ${property(c.listingId)}?`,
+          "Answer once. Until then these dates stay protected and no cleaning is scheduled for them.",
+          () =>
+            show(
+              "How should this calendar’s blocks count?",
+              <PolicyQuestion connection={c} />,
+            ),
+        ),
+      )}
+      {attention.conflicts.map((c) =>
+        row(
+          c.id,
+          <TriangleAlert />,
+          `${property(c.listingId)}: ${lowerFirst(CONFLICT_LABEL[c.kind] ?? label(c.kind))}`,
+          `Overlap ${c.overlapStart} → ${c.overlapEnd}. Both remain protected; nothing was cancelled.`,
+          () =>
+            show("Overlapping dates", <ConflictDetail conflict={c} />, true),
+        ),
+      )}
+      {unknown
+        .slice(0, LISTED)
+        .map((b) =>
+          row(
+            b.id,
+            <CircleHelp />,
+            `${property(b.listingId)}: unknown block${b.reviewFlags.length ? ", " + flagsText(b) : ""}`,
+            `${b.startDate} → ${b.endDate} · protected; classify it to schedule cleaning if it is a stay.`,
+            () => show("Protected dates", <BlockDetail id={b.id} />, true),
+          ),
+        )}
+      {flagged
+        .slice(0, LISTED)
+        .map((b) =>
+          row(
+            b.id,
+            <Info />,
+            `${property(b.listingId)}: ${flagsText(b)}`,
+            `${b.startDate} → ${b.endDate} · review the evidence; dates stay protected.`,
+            () => show("Protected dates", <BlockDetail id={b.id} />, true),
+          ),
+        )}
+      {(unknown.length > LISTED || flagged.length > LISTED) && (
+        <p className="panel-footnote">
+          {[
+            unknown.length > LISTED &&
+              `${unknown.length - LISTED} more unknown block${unknown.length - LISTED === 1 ? "" : "s"}`,
+            flagged.length > LISTED &&
+              `${flagged.length - LISTED} more flagged date range${flagged.length - LISTED === 1 ? "" : "s"}`,
+          ]
+            .filter(Boolean)
+            .join(" and ")}{" "}
+          are marked in the calendar below.
+        </p>
+      )}
+      {attention.capped && (
+        <p className="panel-footnote">
+          Showing the first 300 items. Resolve these to see more.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function useBlock(id: string) {
+  const [state, setState] = useState<{
+    block: CalendarBlock;
+    preview: ReleasePreview;
+    history: BlockHistory;
+  } | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let active = true;
+    api<{
+      block: CalendarBlock;
+      preview: ReleasePreview;
+      history: BlockHistory;
+    }>("blocks/" + id)
+      .then((r) => {
+        if (active) {
+          setState(r);
+          setError("");
+        }
+      })
+      .catch((e) => {
+        if (active) setError(e.message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [id]);
+  return { ...state, error };
+}
+
+const HISTORY_LABEL: Record<string, string> = {
+  BLOCK_CREATED: "Protected",
+  BLOCK_UPDATED: "Changed",
+  BLOCK_ACTIVE: "Protected again",
+  BLOCK_MISSING_OBSERVED: "Missing from a check",
+  BLOCK_AWAITING_DECISION: "Waiting for your decision",
+  BLOCK_RETAINED_HOLD: "Kept blocked",
+  BLOCK_RELEASED: "Released",
+};
+
+function BlockDetail({ id }: { id: string }) {
+  const { data, show, close } = useWorkspace();
+  const now = useNow();
+  const { block: b, preview, history, error } = useBlock(id);
+  if (error) return <ErrorBox message={error} />;
+  if (!b || !preview) return <p className="muted">Loading…</p>;
+  const l = data.listings.find((x) => x.id === b.listingId);
+  const c = data.connections.find((x) => x.id === b.connectionId);
+  const reservation = b.reservation;
+  const task = reservation
+    ? data.tasks.find((t) => t.reservationId === reservation.id && !t.closedAt)
+    : undefined;
+  const imported = !!b.connectionId;
+  const canClassify =
+    imported &&
+    b.lifecycle !== "RELEASED" &&
+    (b.identityKind === "UID" || b.identityKind === "RECURRENCE_INSTANCE");
+  const restorable =
+    b.lifecycle === "RELEASED" &&
+    !!b.restorableUntil &&
+    Date.parse(b.restorableUntil) > now;
+  return (
+    <div className="booking-detail">
+      <div className="badge-row">
+        <Badge>{CLASS_LABEL[b.effectiveClass]}</Badge>
+        <Badge tone={b.lifecycle === "ACTIVE" ? "" : "attention"}>
+          {blockState(b, now)}
+        </Badge>
+      </div>
+      <h2>{blockTitle(b)}</h2>
+      <p>
+        {l?.name} ·{" "}
+        {c
+          ? `${c.label || c.platformName} calendar`
+          : HOLD_LABEL[b.holdType ?? ""] || "Created by you"}
+      </p>
+      <dl>
+        <div>
+          <dt>Arrival</dt>
+          <dd>{b.startDate}</dd>
+        </div>
+        <div>
+          <dt>Departure (not protected)</dt>
+          <dd>
+            {b.endDate} · {nightsText(b.startDate, b.endDate)}
+          </dd>
+        </div>
+        <div>
+          <dt>Time zone</dt>
+          <dd>{l?.timezone}</dd>
+        </div>
+        <div>
+          <dt>Buffer days</dt>
+          <dd>
+            {b.buffer.before} before · {b.buffer.after} after
+            {b.buffer.overridden ? " (your override)" : " (property default)"}
+          </dd>
+        </div>
+        {imported && (
+          <div>
+            <dt>First observed</dt>
+            <dd>
+              {b.firstSeenAt ? dateTime(b.firstSeenAt) : "Not recorded"} (not
+              the booking time)
+            </dd>
+          </div>
+        )}
+        {imported && (
+          <div>
+            <dt>Last seen in its calendar</dt>
+            <dd>{b.lastSeenAt ? dateTime(b.lastSeenAt) : "Not recorded"}</dd>
+          </div>
+        )}
+        {reservation && (
+          <div>
+            <dt>Reservation total</dt>
+            <dd>
+              {reservation.price === null
+                ? "Not provided by the calendar"
+                : money(reservation.price, reservation.currency)}
+            </dd>
+          </div>
+        )}
+        {reservation && (
+          <div>
+            <dt>Cleaning</dt>
+            <dd>{task ? label(task.status) : "Not scheduled"}</dd>
+          </div>
+        )}
+      </dl>
+      <p className="callout">
+        <strong>Why this classification: </strong>
+        {EVIDENCE_LABEL[b.evidenceRule] ?? "Recorded with its evidence."}
+        {b.suggested && b.effectiveClass === "UNKNOWN"
+          ? ` The platform’s label suggests ${CLASS_LABEL[b.suggested].toLowerCase()}; that is not applied until you confirm it.`
+          : ""}
+        {b.effectiveClass === "UNKNOWN"
+          ? " Unknown dates stay protected; no cleaning is scheduled for them."
+          : ""}
+      </p>
+      {b.pendingChange?.startDate && (
+        <p className="callout">
+          The calendar now shows {b.pendingChange.startDate} →{" "}
+          {b.pendingChange.endDate}. Changes that would remove protection wait
+          for a complete, healthy check.
+        </p>
+      )}
+      {b.reviewFlags.length > 0 && (
+        <div className="callout">
+          <strong>Review</strong>
+          <ul className="review-flags">
+            {b.reviewFlags.map((f) => (
+              <li key={f}>
+                <strong>{FLAG_LABEL[f] ?? label(f)}.</strong>{" "}
+                {FLAG_EXPLANATION[f] ?? "Check the evidence."}
+                {f === "OVERRIDE_SOURCE_CHANGED" && (
+                  <>
+                    {" "}
+                    Your decision:{" "}
+                    {b.overrideClassification
+                      ? CLASS_LABEL[b.overrideClassification]
+                      : "no classification override"}
+                    {b.buffer.overridden
+                      ? `; buffer days ${b.buffer.before} before, ${b.buffer.after} after`
+                      : ""}
+                    . The calendar now shows {b.startDate} → {b.endDate}, which
+                    on its own counts as{" "}
+                    {CLASS_LABEL[b.classification]?.toLowerCase() ?? "unknown"}.
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+          <div className="form-actions">
+            <AcknowledgeButton block={b} />
+          </div>
+        </div>
+      )}
+      <div className="stack-actions">
+        {(b.lifecycle === "AWAITING_DECISION" ||
+          b.lifecycle === "MISSING_OBSERVED") && (
+          <Button
+            primary
+            onClick={() =>
+              show("Keep these dates blocked", <KeepForm block={b} />)
+            }
+          >
+            Keep dates blocked
+          </Button>
+        )}
+        {protective(b) && (
+          <Button
+            onClick={() =>
+              show(
+                "Review before reopening",
+                <ReleaseForm block={b} preview={preview} />,
+              )
+            }
+          >
+            Reopen these dates…
+          </Button>
+        )}
+        {restorable && (
+          <Button
+            primary
+            onClick={() =>
+              show("Restore protection", <RestoreForm block={b} />)
+            }
+          >
+            Restore protection
+          </Button>
+        )}
+        {canClassify && (
+          <Button
+            onClick={() =>
+              show("Classify these dates", <ClassifyForm block={b} />)
+            }
+          >
+            Classify…
+          </Button>
+        )}
+        {protective(b) && (
+          <Button onClick={() => show("Buffer days", <BufferForm block={b} />)}>
+            Adjust buffer days…
+          </Button>
+        )}
+        {reservation && (
+          <Button
+            onClick={() =>
+              show(
+                "Guest details",
+                <ReservationEdit reservation={reservation} blockId={b.id} />,
+              )
+            }
+          >
+            Add guest details & price
+          </Button>
+        )}
+        {reservation && (
+          <Link
+            className="button"
+            href={"/inbox?reservation=" + reservation.id}
+            onClick={close}
+          >
+            Open message thread
+            <ArrowUpRight size={15} />
+          </Link>
+        )}
+      </div>
+      {history && history.length > 0 && (
+        <section className="explain-list" aria-label="History">
+          <h3>History</h3>
+          {history.map((h, i) => (
+            <article key={i}>
+              <Badge>{HISTORY_LABEL[h.type] ?? label(h.type)}</Badge>
+              <small>
+                {" "}
+                {dateTime(h.createdAt)} ·{" "}
+                {h.payload.cause?.startsWith("observation:")
+                  ? "calendar check"
+                  : h.payload.cause?.startsWith("host:")
+                    ? "your action"
+                    : "system"}
+              </small>
+            </article>
+          ))}
+        </section>
+      )}
+    </div>
+  );
+}
+
+/** Posts once, reports the outcome, and returns to the dates' detail. */
+function ActionForm({
+  path,
+  build,
+  label: buttonLabel,
+  done = "Saved.",
+  children,
+  back,
+  method = "POST",
+}: {
+  path: string;
+  build: (f: FormData) => unknown;
+  label: string;
+  /** What the host is told once the action is recorded. */
+  done?: string;
+  children: ReactNode;
+  back?: string;
+  method?: string;
+}) {
+  const { mutate, show, close, toast } = useWorkspace();
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setBusy(true);
+        setError("");
+        try {
+          const result = await mutate<{ id?: string } | null>(
+            path,
+            build(new FormData(e.currentTarget)),
+            method,
+          );
+          toast(done);
+          const target = back ?? result?.id;
+          if (target)
+            show("Protected dates", <BlockDetail id={target} />, true);
+          else close();
+        } catch (err) {
+          setError(
+            err instanceof APIError && err.status === 409
+              ? `${err.message} Close this form and open the dates again to see their current state.`
+              : (err as Error).message,
+          );
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      {children}
+      {error && <ErrorBox message={error} />}
+      <div className="form-actions">
+        <Button type="button" onClick={close}>
+          Cancel
+        </Button>
+        <Button primary disabled={busy} type="submit">
+          {busy ? "Saving…" : buttonLabel}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+function ReasonField() {
+  return (
+    <Field label="Reason for the history">
+      <textarea name="reason" minLength={3} maxLength={1000} required />
+    </Field>
+  );
+}
+
+/** LIFE 03: reopening shows nights, buffers, channels and open overlaps. */
+function ReleaseForm({
+  block: b,
+  preview,
+}: {
+  block: CalendarBlock;
+  preview: ReleasePreview;
+}) {
+  const confirm =
+    !!b.connectionId &&
+    (b.effectiveClass === "RESERVATION" || b.effectiveClass === "UNKNOWN");
+  const platform = b.platform === "OTHER" ? "its platform" : label(b.platform);
+  return (
+    <ActionForm
+      path={`blocks/${b.id}/release`}
+      back={b.id}
+      label="Reopen these dates"
+      done="Dates released. You can restore them for 24 hours."
       build={(f) => ({
-        listingId: f.get("listingId"),
-        from: f.get("from"),
-        to: f.get("to"),
+        expectedRevision: preview.revision,
         reason: f.get("reason"),
-        idempotencyKey: id.current,
+        externalResolutionConfirmed: f.get("confirmed") === "on",
+      })}
+    >
+      <dl className="review-list">
+        <div>
+          <dt>Nights that reopen</dt>
+          <dd>
+            {preview.nights.startDate} → {preview.nights.endDate} (
+            {nightsText(preview.nights.startDate, preview.nights.endDate)})
+          </dd>
+        </div>
+        <div>
+          <dt>Buffer days that reopen</dt>
+          <dd>
+            {preview.buffers.before} before · {preview.buffers.after} after
+          </dd>
+        </div>
+        <div>
+          <dt>Export links that change</dt>
+          <dd>
+            {preview.channels.length
+              ? preview.channels
+                  .map(
+                    (c) =>
+                      `${c.label || label(c.platform)}${c.isSource ? " (source of these dates)" : ""}`,
+                  )
+                  .join(", ")
+              : "None"}
+          </dd>
+        </div>
+        {preview.conflicts.length > 0 && (
+          <div>
+            <dt>Open overlaps</dt>
+            <dd>
+              {preview.conflicts
+                .map(
+                  (c) =>
+                    `${CONFLICT_LABEL[c.kind] ?? label(c.kind)} ${c.overlapStart} → ${c.overlapEnd}`,
+                )
+                .join("; ")}
+            </dd>
+          </div>
+        )}
+        {preview.turnover.length > 0 && (
+          <div>
+            <dt>Cleaning</dt>
+            <dd>
+              {preview.turnover.length} turnover task
+              {preview.turnover.length === 1 ? "" : "s"}: cancelled if not
+              started, flagged for your review if under way.
+            </dd>
+          </div>
+        )}
+      </dl>
+      <ul className="limits">
+        {preview.limits.map((text) => (
+          <li key={text}>{text}</li>
+        ))}
+      </ul>
+      {confirm && (
+        <label className="checkbox">
+          <input name="confirmed" type="checkbox" required />I checked this stay
+          on {platform}; it is cancelled or no longer needs these dates.
+        </label>
+      )}
+      <ReasonField />
+    </ActionForm>
+  );
+}
+
+function KeepForm({ block: b }: { block: CalendarBlock }) {
+  return (
+    <ActionForm
+      path={`blocks/${b.id}/keep`}
+      back={b.id}
+      label="Keep blocked"
+      done="Dates kept blocked."
+      build={(f) => ({ expectedRevision: b.revision, reason: f.get("reason") })}
+    >
+      <p className="form-intro">
+        These dates stay protected as your hold, and this question is not asked
+        again. You can reopen them later.
+      </p>
+      <ReasonField />
+    </ActionForm>
+  );
+}
+
+/** REL 01: in shadow mode nothing is served yet; say so where copy promises it. */
+function ShadowNote({ turnover = false }: { turnover?: boolean }) {
+  const { data } = useWorkspace();
+  if (data.workspace.calendarMode !== "SHADOW") return null;
+  return (
+    <p className="form-intro muted">
+      Shadow mode: export links start serving these dates
+      {turnover ? ", and turnover work is scheduled," : ""} when this workspace
+      goes live.
+    </p>
+  );
+}
+
+function RestoreForm({ block: b }: { block: CalendarBlock }) {
+  return (
+    <ActionForm
+      path={`blocks/${b.id}/restore`}
+      label="Restore protection"
+      done="Dates protected again with a new hold."
+      build={(f) => ({ expectedRevision: b.revision, reason: f.get("reason") })}
+    >
+      <p className="callout">
+        This protects {b.startDate} → {b.endDate} again with a new hold and
+        publishes it to every export link. It cannot undo a platform’s refresh
+        that already reopened these dates, or cancel a booking made in the
+        meantime.
+      </p>
+      <ShadowNote />
+      <ReasonField />
+    </ActionForm>
+  );
+}
+
+function ClassifyForm({ block: b }: { block: CalendarBlock }) {
+  return (
+    <ActionForm
+      path={`blocks/${b.id}/classify`}
+      back={b.id}
+      label="Save classification"
+      done="Classification saved."
+      build={(f) => ({
+        expectedRevision: b.revision,
+        classification:
+          f.get("classification") === "EVIDENCE"
+            ? null
+            : f.get("classification"),
+        reason: f.get("reason"),
       })}
     >
       <p className="form-intro">
-        This blocks availability in your export feeds. Existing reservations and
-        buffer days are protected.
+        Your classification is kept separate from what the calendar shows. If
+        the source changes later, the dates stay protected and you are asked to
+        review.
       </p>
-      <Field label="Property">
-        <select name="listingId" defaultValue={initial.listingId}>
+      <fieldset className="choices">
+        <legend>These dates are</legend>
+        {[
+          ["RESERVATION", "A guest reservation (schedules turnover cleaning)"],
+          ["OWNER_BLOCK", "An owner block or closure (no cleaning)"],
+          ["UNKNOWN", "Unknown (protected, no cleaning)"],
+          ["EVIDENCE", "Use the calendar’s own evidence"],
+        ].map(([value, text]) => (
+          <label className="checkbox" key={value}>
+            <input
+              type="radio"
+              name="classification"
+              value={value}
+              required
+              defaultChecked={
+                (b.overrideClassification ?? "EVIDENCE") === value
+              }
+            />
+            {text}
+          </label>
+        ))}
+      </fieldset>
+      <ReasonField />
+    </ActionForm>
+  );
+}
+
+function BufferForm({ block: b }: { block: CalendarBlock }) {
+  const day = (name: "before" | "after") => (
+    <Field label={name === "before" ? "Days before" : "Days after"}>
+      <input
+        name={name}
+        type="number"
+        min={0}
+        max={14}
+        defaultValue={b.buffer.overridden ? b.buffer[name] : ""}
+        placeholder="Property default"
+      />
+    </Field>
+  );
+  return (
+    <ActionForm
+      path={`blocks/${b.id}/buffers`}
+      back={b.id}
+      label="Save buffer days"
+      done="Buffer days saved."
+      build={(f) => ({
+        expectedRevision: b.revision,
+        before: f.get("before") === "" ? null : Number(f.get("before")),
+        after: f.get("after") === "" ? null : Number(f.get("after")),
+        reason: f.get("reason"),
+      })}
+    >
+      <p className="form-intro">
+        Leave a field empty to use the property default. Buffer days are
+        published to every export link as unavailable.
+      </p>
+      <ShadowNote />
+      <div className="form-grid">
+        {day("before")}
+        {day("after")}
+      </div>
+      <ReasonField />
+    </ActionForm>
+  );
+}
+
+function AcknowledgeButton({ block: b }: { block: CalendarBlock }) {
+  const { mutate, show, toast } = useWorkspace();
+  const [busy, setBusy] = useState(false);
+  return (
+    <Button
+      disabled={busy}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          await mutate(`blocks/${b.id}/acknowledge`, {
+            expectedRevision: b.revision,
+            flags: b.reviewFlags,
+          });
+          toast("Marked as reviewed. The dates stay protected.");
+          show("Protected dates", <BlockDetail id={b.id} />, true);
+        } catch (e) {
+          toast((e as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      I reviewed this
+    </Button>
+  );
+}
+
+function ReservationEdit({
+  reservation: r,
+  blockId,
+}: {
+  reservation: NonNullable<CalendarBlock["reservation"]>;
+  blockId: string;
+}) {
+  return (
+    <ActionForm
+      path={"bookings/" + r.id}
+      method="PATCH"
+      back={blockId}
+      label="Save guest details"
+      build={(f) => ({
+        guestName: f.get("name"),
+        guestContact: f.get("contact"),
+        price: f.get("price") === "" ? null : Number(f.get("price")),
+        version: r.version,
+      })}
+    >
+      <Field label="Guest name">
+        <input
+          name="name"
+          required
+          defaultValue={
+            r.guestName === "Guest details unavailable" ? "" : r.guestName
+          }
+        />
+      </Field>
+      <Field
+        label="Guest contact"
+        hint="Stored encrypted. For direct-booking email replies, enter an email address. Saving replaces any previous contact."
+      >
+        <input name="contact" autoComplete="off" />
+      </Field>
+      <Field label={`Reservation total (${r.currency})`}>
+        <input
+          name="price"
+          type="number"
+          min="0"
+          step="0.01"
+          defaultValue={r.price ?? ""}
+        />
+      </Field>
+    </ActionForm>
+  );
+}
+
+type PolicyMode = Connection["policy"]["mode"];
+type PolicyLabel = {
+  key: string;
+  /** The label as the platform shows it; null for no label or others. */
+  text: string | null;
+  count: number;
+  suggested: string | null;
+};
+type PolicySample = {
+  policy: {
+    mode: PolicyMode;
+    labels: Record<string, string> | null;
+    version: number;
+    decidedAt: string | null;
+  };
+  singleLabelForStaysAndClosures: boolean;
+  labels: PolicyLabel[];
+  sample: {
+    startDate: string;
+    endDate: string;
+    labelKey: string;
+    identityUncertain: boolean;
+  }[];
+  total: number;
+  sampleDigest: string;
+};
+
+/** CLASS 02: asked once per connection, with a sample of observed events. */
+export function PolicyQuestion({ connection: c }: { connection: Connection }) {
+  const { mutate, close, toast } = useWorkspace();
+  const [sample, setSample] = useState<PolicySample | null>(null),
+    [modeChoice, setModeChoice] = useState<PolicyMode | null>(null),
+    [reload, setReload] = useState(0),
+    [error, setError] = useState(""),
+    [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let active = true;
+    api<PolicySample>(`connections/${c.id}/policy`)
+      .then((s) => {
+        if (active) setSample(s);
+      })
+      .catch((e) => {
+        if (active) setError(e.message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [c.id, reload]);
+  if (error && !sample) return <ErrorBox message={error} />;
+  if (!sample) return <p className="muted">Loading the observed events…</p>;
+  const name = c.label || c.platformName;
+  const decided =
+    sample.policy.mode !== "UNSET" || sample.policy.decidedAt !== null;
+  const mode =
+    modeChoice ??
+    (decided ? sample.policy.mode : suggestedPolicyMode(sample.labels));
+  const byKey = new Map(sample.labels.map((l) => [l.key, l]));
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault();
+        if (!mode) {
+          setError(`Choose how blocks from ${name} should count.`);
+          return;
+        }
+        const f = new FormData(e.currentTarget);
+        setBusy(true);
+        setError("");
+        try {
+          const labels =
+            mode === "BY_LABEL"
+              ? Object.fromEntries(
+                  sample.labels.map((l) => [l.key, f.get("label:" + l.key)]),
+                )
+              : null;
+          const result = await mutate<{ reclassified: number }>(
+            `connections/${c.id}/policy`,
+            {
+              mode,
+              labels,
+              expectedVersion: sample.policy.version,
+              sampleDigest: sample.sampleDigest,
+            },
+          );
+          toast(
+            `Saved for ${name}. ${result.reclassified} date range${result.reclassified === 1 ? "" : "s"} reclassified.`,
+          );
+          close();
+        } catch (err) {
+          setError((err as Error).message);
+          // The calendar or the policy changed meanwhile: show the new
+          // evidence so the answer is given against what is current.
+          if (err instanceof APIError && err.status === 409)
+            setReload((r) => r + 1);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      <p className="form-intro">
+        {sample.singleLabelForStaysAndClosures
+          ? `${name} uses one label for guest stays and your own closures, so its blocks cannot be told apart automatically.`
+          : `${name} does not say reliably whether its blocks are guest stays.`}{" "}
+        Your answer applies to this calendar’s blocks now and later; you can
+        change it at any time. Cancellations, echoes of your own export links
+        and overlaps still follow their own rules.
+      </p>
+      <table className="sample-table">
+        <caption>
+          {sample.total} protected date range{sample.total === 1 ? "" : "s"}{" "}
+          observed
+          {sample.total > sample.sample.length
+            ? "; the first 20 are shown"
+            : ""}
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">Arrival</th>
+            <th scope="col">Departure</th>
+            <th scope="col">Label</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sample.sample.map((s, i) => (
+            <tr key={i}>
+              <td>{s.startDate}</td>
+              <td>{s.endDate}</td>
+              <td>
+                {policyLabelName(
+                  s.labelKey,
+                  byKey.get(s.labelKey)?.text ?? null,
+                )}
+                {s.identityUncertain ? " (identity uncertain)" : ""}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <fieldset className="choices">
+        <legend>Blocks from {name} are</legend>
+        {(
+          [
+            ["BY_LABEL", "It depends on the label"],
+            [
+              "RESERVATIONS",
+              "All guest reservations: schedule turnover cleaning",
+            ],
+            ["OWNER_BLOCKS", "All my own closures: no cleaning"],
+            ["UNSET", "I will classify each block myself"],
+          ] as const
+        ).map(([value, text]) => (
+          <label className="checkbox" key={value}>
+            <input
+              type="radio"
+              name="mode"
+              value={value}
+              checked={mode === value}
+              onChange={() => setModeChoice(value)}
+            />
+            {text}
+          </label>
+        ))}
+      </fieldset>
+      {mode === "BY_LABEL" &&
+        sample.labels.map((l) => (
+          <Field
+            key={l.key}
+            label={`${policyLabelName(l.key, l.text)} · ${l.count ? `${l.count} observed` : "not observed yet"}`}
+            hint={
+              l.suggested && l.suggested !== "UNKNOWN"
+                ? `Suggested: ${CLASS_LABEL[l.suggested]} (unverified; you decide)`
+                : undefined
+            }
+          >
+            <select
+              name={"label:" + l.key}
+              defaultValue={
+                sample.policy.labels?.[l.key] ?? l.suggested ?? "UNKNOWN"
+              }
+            >
+              <option value="RESERVATION">Guest reservation</option>
+              <option value="OWNER_BLOCK">Owner block</option>
+              <option value="UNKNOWN">Unknown: protected, no cleaning</option>
+            </select>
+          </Field>
+        ))}
+      {error && <ErrorBox message={error} />}
+      <div className="form-actions">
+        <Button type="button" onClick={close}>
+          {decided ? "Cancel" : "Ask me later"}
+        </Button>
+        <Button primary disabled={busy || !mode} type="submit">
+          {busy ? "Saving…" : "Save answer"}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+/** CONFLICT 01: both stays stay protected; the host records the outcome. */
+function ConflictDetail({ conflict: c }: { conflict: Conflict }) {
+  const { data, show } = useWorkspace();
+  const a = useBlock(c.blockAId),
+    b = useBlock(c.blockBId);
+  const side = (x: ReturnType<typeof useBlock>) => {
+    const block = x.block;
+    return block ? (
+      <button
+        className="list-row"
+        onClick={() =>
+          show("Protected dates", <BlockDetail id={block.id} />, true)
+        }
+      >
+        <span className="grow">
+          <strong>{blockTitle(block)}</strong>
+          <small>
+            {CLASS_LABEL[block.effectiveClass]} · {label(block.platform)} ·{" "}
+            {block.startDate} → {block.endDate}
+            {block.firstSeenAt
+              ? ` · first observed ${dateTime(block.firstSeenAt)}`
+              : ""}
+          </small>
+        </span>
+        <ArrowUpRight size={16} />
+      </button>
+    ) : (
+      <p className="muted">{x.error || "Loading…"}</p>
+    );
+  };
+  return (
+    <div className="booking-detail">
+      <Badge tone={c.severity === "HIGH" ? "attention" : ""}>
+        {label(c.severity)} priority
+      </Badge>
+      <h2>{CONFLICT_LABEL[c.kind]}</h2>
+      <p>
+        {data.listings.find((l) => l.id === c.listingId)?.name} · overlap{" "}
+        {c.overlapStart} → {c.overlapEnd}
+      </p>
+      {side(a)}
+      {side(b)}
+      <p className="callout">
+        Both date ranges remain protected. Choosing which stay to keep does not
+        cancel the other on its platform; handle the guest and the platform
+        first, then record what you did.
+      </p>
+      <ActionForm
+        path={`conflicts/${c.id}/resolve`}
+        label="Record resolution"
+        build={(f) => ({ expectedRevision: c.revision, note: f.get("note") })}
+      >
+        <Field label="What you did">
+          <textarea name="note" minLength={10} maxLength={1000} required />
+        </Field>
+      </ActionForm>
+    </div>
+  );
+}
+
+/** MANUAL 01: overlaps are previewed; saving anyway is an explicit choice. */
+function OverlapForm({
+  path,
+  build,
+  label: buttonLabel,
+  children,
+}: {
+  path: string;
+  build: (f: FormData) => Record<string, unknown>;
+  label: string;
+  children: ReactNode;
+}) {
+  const { data, mutate, close, toast } = useWorkspace();
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState(""),
+    [overlaps, setOverlaps] = useState<Overlap[] | null>(null),
+    [acknowledged, setAcknowledged] = useState(false);
+  return (
+    <form
+      onChange={(e) => {
+        // Any edit after a warning needs a fresh overlap check.
+        if ((e.target as { name?: string }).name === "acknowledge") return;
+        setOverlaps(null);
+        setAcknowledged(false);
+      }}
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setBusy(true);
+        setError("");
+        try {
+          await mutate(path, {
+            ...build(new FormData(e.currentTarget)),
+            acknowledgeOverlaps: acknowledged,
+          });
+          toast(
+            data.workspace.calendarMode === "SHADOW"
+              ? "Saved. Export links include it once this workspace goes live."
+              : "Saved. Every export link for this property includes it.",
+          );
+          close();
+        } catch (err) {
+          if (err instanceof APIError && err.code === "DATE_CONFLICT")
+            setOverlaps(
+              (err.details as { overlaps?: Overlap[] } | undefined)?.overlaps ??
+                [],
+            );
+          else setError((err as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      {children}
+      {overlaps && (
+        <div className="callout" role="alert">
+          <strong>These dates overlap protected dates or buffer days:</strong>
+          <ul>
+            {overlaps.map((o) => (
+              <li key={o.blockId}>
+                {CLASS_LABEL[o.classification] ?? label(o.classification)}{" "}
+                {o.startDate} → {o.endDate}
+                {o.kind === "BUFFER" ? " (buffer days)" : ""}
+              </li>
+            ))}
+          </ul>
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              name="acknowledge"
+              checked={acknowledged}
+              onChange={(e) => setAcknowledged(e.target.checked)}
+            />
+            Save anyway. The overlap is recorded and shown until you resolve it.
+          </label>
+        </div>
+      )}
+      {error && <ErrorBox message={error} />}
+      <div className="form-actions">
+        <Button type="button" onClick={close}>
+          Cancel
+        </Button>
+        <Button
+          primary
+          disabled={busy || (!!overlaps && !acknowledged)}
+          type="submit"
+        >
+          {busy ? "Saving…" : buttonLabel}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+function PropertyDates({
+  initial,
+  listingId,
+  onListing,
+  arrival,
+  departure,
+}: {
+  initial: { from?: string; to?: string };
+  listingId: string;
+  onListing: (id: string) => void;
+  arrival: string;
+  departure: string;
+}) {
+  const { data } = useWorkspace();
+  const listing = data.listings.find((l) => l.id === listingId);
+  const channels = data.connections.filter(
+    (c) => c.listingId === listingId && c.enabled,
+  );
+  return (
+    <>
+      <Field
+        label="Property"
+        hint={
+          listing
+            ? `Dates are in ${listing.timezone}. Export links affected: ${channels.length ? channels.map((c) => c.label || c.platformName).join(", ") : "none yet"}.`
+            : undefined
+        }
+      >
+        <select
+          name="listingId"
+          value={listingId}
+          onChange={(e) => onListing(e.target.value)}
+        >
           {data.listings.map((l) => (
             <option value={l.id} key={l.id}>
               {l.name}
@@ -557,7 +1819,7 @@ export function BlockForm({
         </select>
       </Field>
       <div className="form-grid">
-        <Field label="First blocked night">
+        <Field label={arrival}>
           <input
             name="from"
             type="date"
@@ -565,258 +1827,126 @@ export function BlockForm({
             required
           />
         </Field>
-        <Field label="Available again on">
+        <Field label={departure} hint="Not included: the first free night.">
           <input
             name="to"
             type="date"
-            defaultValue={initial.to || dateOnly(dayAdd(new Date(), 1))}
+            defaultValue={initial.to || shift(localDate(), 1)}
             required
           />
         </Field>
       </div>
+    </>
+  );
+}
+
+export function HoldForm({
+  initial = {},
+}: {
+  initial?: { listingId?: string; from?: string; to?: string };
+}) {
+  const { data } = useWorkspace();
+  const key = useRef(crypto.randomUUID());
+  const [listingId, setListingId] = useState(
+    initial.listingId || data.listings[0]?.id || "",
+  );
+  return (
+    <OverlapForm
+      path="calendar/block"
+      label="Hold dates"
+      build={(f) => ({
+        listingId,
+        from: f.get("from"),
+        to: f.get("to"),
+        holdType: f.get("holdType"),
+        reason: f.get("reason"),
+        idempotencyKey: key.current,
+      })}
+    >
+      <p className="form-intro">
+        A hold protects these nights in every export link for the property. It
+        is yours: calendar checks never remove it.
+      </p>
+      <ShadowNote />
+      <PropertyDates
+        initial={initial}
+        listingId={listingId}
+        onListing={setListingId}
+        arrival="First held night"
+        departure="Available again on"
+      />
+      <Field label="Kind of hold">
+        <select name="holdType" defaultValue="OWNER">
+          <option value="OWNER">Owner hold (personal use)</option>
+          <option value="MAINTENANCE">Maintenance</option>
+        </select>
+      </Field>
       <Field label="Reason">
         <input
           name="reason"
-          placeholder="Maintenance, personal stay…"
+          placeholder="Personal stay, repairs…"
           maxLength={200}
           required
         />
       </Field>
-    </MutationForm>
+    </OverlapForm>
   );
 }
-function BookingDetail({ booking: b }: { booking: Booking }) {
-  const { data, explain, show, close } = useWorkspace();
-  const l = data.listings.find((l) => l.id === b.listingId);
-  const task = data.tasks.find((t) => t.bookingId === b.id);
-  return (
-    <div className="booking-detail">
-      <Badge>{label(b.status)}</Badge>
-      <h2>{b.kind === "BLOCK" ? b.reason : b.guestName}</h2>
-      <p>
-        {l?.name} · {label(b.platform)}
-      </p>
-      <dl>
-        <div>
-          <dt>Check-in</dt>
-          <dd>{b.startDate}</dd>
-        </div>
-        <div>
-          <dt>Checkout</dt>
-          <dd>{b.endDate}</dd>
-        </div>
-        <div>
-          <dt>Reservation total</dt>
-          <dd>
-            {b.price === null
-              ? "Not provided by feed"
-              : money(b.price, b.currency)}
-          </dd>
-        </div>
-        <div>
-          <dt>Cleaning</dt>
-          <dd>{task ? label(task.status) : "Not scheduled"}</dd>
-        </div>
-        <div>
-          <dt>Protected buffer</dt>
-          <dd>{l?.bufferDays} day(s)</dd>
-        </div>
-      </dl>
-      <div className="stack-actions">
-        <Link
-          className="button"
-          href={"/inbox?booking=" + b.id}
-          onClick={close}
-        >
-          Open message thread
-          <ArrowUpRight size={15} />
-        </Link>
-        <Button onClick={() => explain(b.id)}>
-          Why / history
-          <Info size={15} />
-        </Button>
-        <Button
-          onClick={() =>
-            show("Add booking details", <BookingEdit booking={b} />)
-          }
-        >
-          Edit guest details & price
-        </Button>
-        {(b.status === "CONFLICT" ||
-          b.status === "PENDING_REMOVAL" ||
-          b.kind === "BLOCK") && (
-          <Button
-            onClick={() =>
-              show(
-                "Review before changing availability",
-                <ResolveBooking booking={b} />,
-              )
-            }
-          >
-            {b.kind === "BLOCK"
-              ? "Remove this block"
-              : "Resolve this reservation"}
-          </Button>
-        )}
-      </div>
-      {b.status === "CONFLICT" && (
-        <p className="callout">
-          The earliest confirmed reservation is preferred. No guest reservation
-          has been automatically cancelled. Resolve the outcome with the
-          platform before releasing these dates.
-        </p>
-      )}
-    </div>
-  );
-}
-function BookingEdit({ booking: b }: { booking: Booking }) {
-  return (
-    <MutationForm
-      path={"bookings/" + b.id}
-      method="PATCH"
-      build={(f) => ({
-        guestName: f.get("name"),
-        guestContact: f.get("contact"),
-        price: f.get("price") === "" ? null : Number(f.get("price")),
-        version: b.version,
-      })}
-    >
-      <Field label="Guest name">
-        <input
-          name="name"
-          required
-          defaultValue={
-            b.guestName === "Guest details unavailable" ? "" : b.guestName
-          }
-        />
-      </Field>
-      <Field
-        label="Guest contact"
-        hint="Stored encrypted. For direct-booking email replies, enter an email address. Saving replaces any previous contact."
-      >
-        <input name="contact" required autoComplete="off" />
-      </Field>
-      <Field label={`Total reservation price (${b.currency})`}>
-        <input
-          name="price"
-          type="number"
-          min="0"
-          step="0.01"
-          defaultValue={b.price ?? ""}
-        />
-      </Field>
-    </MutationForm>
-  );
-}
-function ResolveBooking({ booking: b }: { booking: Booking }) {
-  return (
-    <MutationForm
-      path={`bookings/${b.id}/resolve-conflict`}
-      label="Confirm resolution"
-      build={(f) => ({
-        action: b.kind === "BLOCK" ? "REMOVE_BLOCK" : f.get("action"),
-        reason: f.get("reason"),
-        version: b.version,
-        externalResolutionConfirmed: f.get("confirmed") === "on",
-      })}
-    >
-      <p className="callout">
-        Changing internal availability does not cancel or modify the external
-        booking. Released dates may be imported by booking platforms later.
-      </p>
-      {b.kind !== "BLOCK" && (
-        <>
-          <Field label="Resolution">
-            <select name="action">
-              <option value="KEEP">Keep this booking as preferred</option>
-              <option value="DISMISS">
-                Externally resolved — release these dates
-              </option>
-              <option value="CONFIRM_REMOVAL">
-                Confirm the booking was removed externally
-              </option>
-            </select>
-          </Field>
-          <label className="checkbox">
-            <input name="confirmed" type="checkbox" required />I confirmed the
-            outcome with the platform and guest.
-          </label>
-        </>
-      )}
-      <Field label="Reason for the audit trail">
-        <textarea name="reason" minLength={10} maxLength={1000} required />
-      </Field>
-    </MutationForm>
-  );
-}
+/** The command palette opens the same hold review. */
+export const BlockForm = HoldForm;
 
-function DirectBookingForm() {
+function DirectReservationForm() {
   const { data } = useWorkspace();
-  const id = useRef(crypto.randomUUID());
+  const key = useRef(crypto.randomUUID());
   const [listingId, setListingId] = useState(data.listings[0]?.id || "");
   const listing = data.listings.find((l) => l.id === listingId);
   return (
-    <MutationForm
+    <OverlapForm
       path="bookings"
-      label="Confirm reservation"
+      label="Save reservation"
       build={(f) => ({
         listingId,
         from: f.get("from"),
         to: f.get("to"),
         guestName: f.get("guestName"),
-        guestContact: f.get("guestContact"),
+        guestContact: f.get("guestContact") || "",
         price: f.get("price") === "" ? null : Number(f.get("price")),
         currency: listing?.currency || "USD",
-        idempotencyKey: id.current,
+        idempotencyKey: key.current,
       })}
     >
       <p className="form-intro">
-        Record an agreed direct stay. Availability is checked against every
-        reservation and buffer before confirmation. A private email conversation
-        is created for your guest.
+        Record an agreed direct stay. It protects these nights in every export
+        link and schedules turnover work. No payment is collected.
       </p>
-      <Field label="Property">
-        <select
-          name="listingId"
-          value={listingId}
-          onChange={(e) => setListingId(e.target.value)}
-        >
-          {data.listings.map((l) => (
-            <option key={l.id} value={l.id}>
-              {l.name}
-            </option>
-          ))}
-        </select>
-      </Field>
-      <div className="form-grid">
-        <Field label="Check-in">
-          <input name="from" type="date" required defaultValue={localDate()} />
-        </Field>
-        <Field label="Checkout">
-          <input name="to" type="date" required />
-        </Field>
-      </div>
+      <ShadowNote turnover />
+      <PropertyDates
+        initial={{}}
+        listingId={listingId}
+        onListing={setListingId}
+        arrival="Check-in"
+        departure="Checkout"
+      />
       <Field label="Guest name">
         <input name="guestName" autoComplete="off" maxLength={200} required />
       </Field>
       <Field
-        label="Guest email"
-        hint="Encrypted at rest. Replies use your configured email provider."
+        label="Guest email (optional)"
+        hint="Encrypted at rest. Needed for email replies from the inbox."
       >
         <input
           name="guestContact"
           type="email"
           autoComplete="off"
-          required
           maxLength={320}
         />
       </Field>
       <Field
         label={`Reservation total (${listing?.currency || "USD"})`}
-        hint="Leave empty when the total is not yet recorded. No payment is collected."
+        hint="Leave empty when the total is not yet recorded."
       >
         <input name="price" type="number" step="0.01" min="0" />
       </Field>
-    </MutationForm>
+    </OverlapForm>
   );
 }

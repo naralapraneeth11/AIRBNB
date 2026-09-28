@@ -1,0 +1,16 @@
+# External scheduler clock (ARCH 03). Deploy with:
+#   cd ops/clock
+#   npx wrangler@latest secret put CRON_SECRET   # same value as the app's CRON_SECRET
+#   npx wrangler@latest deploy
+# Set APP_URL below to the deployment this clock drives. Use a separate Worker
+# (a separate name and secret) for staging; a clock never spans environments.
+name = "hostsphere-clock-production"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+workers_dev = false
+
+[vars]
+APP_URL = "https://REPLACE_WITH_PRODUCTION_ORIGIN"
+
+[triggers]
+crons = ["* * * * *"]

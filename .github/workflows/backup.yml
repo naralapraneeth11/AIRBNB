@@ -1,0 +1,151 @@
+# REC 01: nightly backups of Postgres, storage objects and encryption keys
+# through three separate paths. Off until an operator configures the
+# "backups" environment and sets the repository variable BACKUPS_ENABLED to
+# "true" (docs/OPERATIONS.md, "Backups"). Every job records its outcome in
+# BackupRun; GET /api/health/operations?check=backups alerts when any path
+# lacks a verified success in 26 hours.
+name: Nightly backups
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backups
+  cancel-in-progress: false
+
+env:
+  BACKUP_OUTPUT_DIR: ${{ github.workspace }}/backups/out
+  BACKUP_RECORDED_BY: github-actions/${{ github.run_id }}
+  BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+  BACKUP_PUBLIC_KEY: ${{ vars.BACKUP_PUBLIC_KEY }}
+  BACKUP_S3_BUCKET: ${{ vars.BACKUP_S3_BUCKET }}
+  BACKUP_S3_ENDPOINT: ${{ vars.BACKUP_S3_ENDPOINT }}
+  AWS_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
+  AWS_DEFAULT_REGION: ${{ vars.BACKUP_S3_REGION || 'auto' }}
+
+jobs:
+  postgres:
+    name: Postgres (dump, restore check, encrypt)
+    if: vars.BACKUPS_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: backups
+    timeout-minutes: 45
+    services:
+      # An empty scratch database: every backup is proven by a full restore.
+      restore:
+        image: postgres:${{ vars.PG_MAJOR || '17' }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: restore_check
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PG_MAJOR: ${{ vars.PG_MAJOR || '17' }}
+      BACKUP_VERIFY_DATABASE_URL: postgresql://postgres:postgres@localhost:5433/restore_check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:generate
+      - name: Install the PostgreSQL client matching the server
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -q
+          sudo apt-get install -yq "postgresql-client-${PG_MAJOR}"
+          echo "PG_DUMP=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_dump" >> "$GITHUB_ENV"
+          echo "PG_RESTORE=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_restore" >> "$GITHUB_ENV"
+      - name: Dump, restore into the scratch database, encrypt
+        run: pnpm backup postgres
+      - name: Store the encrypted artifact off-site
+        run: |
+          destination="s3://${BACKUP_S3_BUCKET}/postgres/$(date -u +%F)/"
+          aws s3 cp --recursive --only-show-errors \
+            ${BACKUP_S3_ENDPOINT:+--endpoint-url "$BACKUP_S3_ENDPOINT"} \
+            "$BACKUP_OUTPUT_DIR" "$destination"
+          echo "BACKUP_DESTINATION=$destination" >> "$GITHUB_ENV"
+      - name: Record the verified backup
+        run: pnpm backup record postgres SUCCEEDED
+      - name: Record the failure
+        if: failure()
+        run: pnpm backup record postgres FAILED
+
+  storage:
+    name: Storage objects (checked against recorded SHA-256, encrypt)
+    if: vars.BACKUPS_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: backups
+    timeout-minutes: 45
+    env:
+      SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      STORAGE_BUCKET: ${{ vars.STORAGE_BUCKET || 'airbnb-private' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:generate
+      - name: Download, verify and encrypt every stored object
+        run: pnpm backup storage
+      - name: Store the encrypted objects and manifest off-site
+        run: |
+          destination="s3://${BACKUP_S3_BUCKET}/storage/$(date -u +%F)/"
+          aws s3 cp --recursive --only-show-errors \
+            ${BACKUP_S3_ENDPOINT:+--endpoint-url "$BACKUP_S3_ENDPOINT"} \
+            "$BACKUP_OUTPUT_DIR" "$destination"
+          echo "BACKUP_DESTINATION=$destination" >> "$GITHUB_ENV"
+      - name: Record the verified backup
+        run: pnpm backup record storage SUCCEEDED
+      - name: Record the failure
+        if: failure()
+        run: pnpm backup record storage FAILED
+
+  keys:
+    name: Encryption keys (escrow decrypts every key version in use)
+    if: vars.BACKUPS_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: backups
+    timeout-minutes: 15
+    env:
+      # The escrow copy lives outside the hosting provider; this secret is
+      # its verification copy, never the application's configuration.
+      ESCROW_ENCRYPTION_KEYS: ${{ secrets.ESCROW_ENCRYPTION_KEYS }}
+      BACKUP_DESTINATION: key escrow (outside the hosting provider)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:generate
+      - name: Verify the escrow against stored ciphertexts
+        run: pnpm backup keys
+      - name: Record the verified escrow
+        run: pnpm backup record keys SUCCEEDED
+      - name: Record the failure
+        if: failure()
+        run: pnpm backup record keys FAILED

@@ -1,4 +1,5 @@
 "use client";
+import Link from "next/link";
 export default function ErrorPage({
   reset,
 }: {
@@ -12,7 +13,7 @@ export default function ErrorPage({
       <button className="button primary" onClick={reset}>
         Try again
       </button>
-      <a href="/login">Sign in again</a>
+      <Link href="/login">Sign in again</Link>
     </main>
   );
 }

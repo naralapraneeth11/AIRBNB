@@ -1,0 +1,5 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Hostsphere fixtures//Empty//EN
+X-HOSTSPHERE-FIXTURE:synthetic;case=empty
+END:VCALENDAR

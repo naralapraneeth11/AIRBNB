@@ -1,0 +1,4 @@
+# The original product specification is preserved verbatim for traceability.
+docs/PRODUCT_SPEC.md
+# Calendar fixtures are byte-exact test inputs (CRLF, folding, malformed data).
+tests/fixtures/

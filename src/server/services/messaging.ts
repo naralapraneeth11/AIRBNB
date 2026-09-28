@@ -26,7 +26,8 @@ export async function inbound(
     tx,
     `inbound:${ctx.workspaceId}:${input.platform}:${input.threadId}`,
   );
-  const booking = await tx.booking.findFirst({
+  // The bridge contract's "bookingId" is the application reservation id.
+  const reservation = await tx.reservation.findFirst({
     where: {
       workspaceId: ctx.workspaceId,
       id: input.bookingId,
@@ -34,7 +35,7 @@ export async function inbound(
     },
   });
   ensure(
-    booking,
+    reservation,
     404,
     "BOOKING_NOT_FOUND",
     "Booking not found for this platform.",
@@ -49,8 +50,8 @@ export async function inbound(
     },
     create: {
       workspaceId: ctx.workspaceId,
-      listingId: booking.listingId,
-      bookingId: booking.id,
+      listingId: reservation.listingId,
+      reservationId: reservation.id,
       externalId: input.threadId,
       platform: input.platform,
       intent: intentOf(input.body),
@@ -58,7 +59,7 @@ export async function inbound(
     update: {},
   });
   ensure(
-    thread.bookingId === booking.id,
+    thread.reservationId === reservation.id,
     409,
     "THREAD_MISMATCH",
     "Thread belongs to another booking.",
