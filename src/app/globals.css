@@ -2252,6 +2252,19 @@ td {
   font-size: 0.8rem !important;
   margin: 35px 0 20px !important;
 }
+.account-links {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin: 26px 0 0 !important;
+  font-size: 0.85rem !important;
+  line-height: 1.6 !important;
+  text-align: center;
+}
+.account-links a {
+  color: var(--accent);
+}
 .login-form-inner > small {
   display: block;
   text-align: center;

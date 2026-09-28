@@ -45,6 +45,13 @@ GRANT SELECT, INSERT ON TABLE "AuditLog", "DomainEvent" TO :"runtime_role";
 GRANT SELECT, UPDATE ON TABLE "SchedulerLease" TO :"runtime_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "SchedulerTick" TO :"runtime_role";
 
+-- Self-service accounts (AUTH 01, AUTH 03): pending sign-ups and reset
+-- links are deleted once used or expired; setup progress is tenant data.
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+  "PendingRegistration", "PasswordReset"
+TO :"runtime_role";
+GRANT SELECT, INSERT, UPDATE ON TABLE "OnboardingProgress" TO :"runtime_role";
+
 -- Read-only: the environment marker is written by the schema owner
 -- (pnpm db:mark-environment) and backup evidence by the backup role.
 GRANT SELECT ON TABLE "DeploymentEnvironment", "BackupRun" TO :"runtime_role";

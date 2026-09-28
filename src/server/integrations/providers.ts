@@ -16,7 +16,12 @@ export async function sendSMS(to: string, text: string) {
   });
   return message.sid;
 }
-export async function sendEmail(to: string, text: string, key: string) {
+export async function sendEmail(
+  to: string,
+  text: string,
+  key: string,
+  subject = "A message about your stay",
+) {
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
@@ -27,7 +32,7 @@ export async function sendEmail(to: string, text: string, key: string) {
     body: JSON.stringify({
       from: required("EMAIL_FROM"),
       to: [to],
-      subject: "A message about your stay",
+      subject,
       text,
     }),
     signal: AbortSignal.timeout(10000),

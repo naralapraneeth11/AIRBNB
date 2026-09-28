@@ -13,7 +13,16 @@ import {
   logout,
   ownerOnly,
   rateLimit,
+  startSession,
 } from "./auth";
+import { accountFeatures } from "./accounts/email";
+import { passwordProblem } from "./accounts/passwords";
+import {
+  register,
+  requestPasswordReset,
+  resetPassword,
+  verifyRegistration,
+} from "./accounts/service";
 import { AppError, ensure } from "./errors";
 import { required, providerStatus } from "./config";
 import {
@@ -52,6 +61,17 @@ import { createConnection } from "./calendar/actions";
 import { propertySettingsChanged } from "./calendar/commit";
 import { connectionDTO, reservationDTO } from "./calendar/dto";
 import { serveExport } from "./calendar/serve";
+
+/** Resolve no sooner than `ms`, so response time does not reveal the path taken. */
+async function atLeast<T>(ms: number, work: Promise<T>): Promise<T> {
+  const started = Date.now();
+  try {
+    return await work;
+  } finally {
+    const wait = ms - (Date.now() - started);
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+  }
+}
 function kick(workspaceId: string) {
   after(async () => {
     try {
@@ -165,6 +185,67 @@ export async function handle(request: NextRequest) {
     }
     if (!["GET", "HEAD", "OPTIONS"].includes(method)) checkOrigin(request);
     if (path[0] === "auth") {
+      // AUTH 01 / AUTH 03. Sign-up and reset requests answer the same way
+      // whether or not an account exists, and take at least as long either
+      // way, so neither the answer nor its timing tells.
+      if (path[1] === "register" && method === "POST") {
+        ensure(
+          accountFeatures().signup,
+          404,
+          "SIGNUP_UNAVAILABLE",
+          "Sign-up is not open on this deployment.",
+        );
+        const input = z
+          .object({
+            name: z.string().trim().min(1).max(100),
+            email: z.email().max(254),
+            password: z.string().max(512),
+            workspaceName: z.string().trim().min(1).max(100),
+          })
+          .parse(await body(request));
+        return json(await atLeast(900, register(input)), 202);
+      }
+      if (path[1] === "verify" && method === "POST") {
+        ensure(
+          accountFeatures().signup,
+          404,
+          "SIGNUP_UNAVAILABLE",
+          "Sign-up is not open on this deployment.",
+        );
+        const input = z
+          .object({ token: z.string().min(30).max(100) })
+          .parse(await body(request));
+        const account = await verifyRegistration(input.token);
+        await startSession(account.userId, account.workspaceId);
+        return json({ ok: true, next: "/setup" });
+      }
+      if (path[1] === "forgot" && method === "POST") {
+        ensure(
+          accountFeatures().reset,
+          404,
+          "RESET_UNAVAILABLE",
+          "Password reset by email is not set up on this deployment.",
+        );
+        const input = z
+          .object({ email: z.email().max(254) })
+          .parse(await body(request));
+        return json(await atLeast(900, requestPasswordReset(input.email)), 202);
+      }
+      if (path[1] === "reset" && method === "POST") {
+        ensure(
+          accountFeatures().reset,
+          404,
+          "RESET_UNAVAILABLE",
+          "Password reset by email is not set up on this deployment.",
+        );
+        const input = z
+          .object({
+            token: z.string().min(30).max(100),
+            password: z.string().max(512),
+          })
+          .parse(await body(request));
+        return json(await resetPassword(input.token, input.password));
+      }
       if (path[1] === "login" && method === "POST") {
         await rateLimit("login-global", 100, 60);
         const input = z
@@ -1449,7 +1530,7 @@ export async function handle(request: NextRequest) {
       const input = z
         .object({
           currentPassword: z.string().max(512),
-          newPassword: z.string().min(14).max(200),
+          newPassword: z.string().max(512),
         })
         .parse(await body(request));
       const u = await db.user.findUniqueOrThrow({ where: { id: ctx.actorId } });
@@ -1459,6 +1540,10 @@ export async function handle(request: NextRequest) {
         "PASSWORD",
         "Current password is incorrect.",
       );
+      const weak = await passwordProblem(input.newPassword, {
+        email: decrypt(u.emailEncrypted, "identity"),
+      });
+      ensure(!weak, 400, "WEAK_PASSWORD", weak ?? "");
       await db.$transaction([
         db.user.update({
           where: { id: u.id },
