@@ -409,12 +409,88 @@ test(
   },
 );
 
+test(
+  "a save whose follow-up refresh fails is reported as saved, with a stale-data notice",
+  { skip },
+  async () => {
+    await page.goto(`${base}/calendar`);
+    await page.getByRole("button", { name: "Hold dates", exact: true }).click();
+    const form = dialog();
+    await form.locator("input[name=from]").fill(day(20));
+    await form.locator("input[name=to]").fill(day(21));
+    await form.locator("input[name=reason]").fill("Deck repairs");
+    // The save itself succeeds; only the workspace refresh after it fails.
+    await page.route("**/api/workspace", (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "Simulated refresh failure." }),
+      }),
+    );
+    await form.getByRole("button", { name: "Hold dates" }).click();
+    await toast()
+      .getByText(/^Saved\./)
+      .waitFor();
+    await page
+      .locator(".stale-notice")
+      .getByText(/may be out of date/)
+      .waitFor();
+    assert.equal(await dialog().count(), 0, "the form closed as saved");
+    assert.equal(
+      await page.locator(".page-content > .error-box").count(),
+      0,
+      "the workspace is not replaced by an error",
+    );
+    await page.unroute("**/api/workspace");
+    await page
+      .locator(".stale-notice")
+      .getByRole("button", { name: "Refresh" })
+      .click();
+    await page.locator(".stale-notice").waitFor({ state: "detached" });
+  },
+);
+
+test(
+  "an unreadable error page is explained instead of shown as a parse error",
+  { skip },
+  async () => {
+    await page.getByRole("button", { name: "Hold dates", exact: true }).click();
+    const form = dialog();
+    await form.locator("input[name=from]").fill(day(24));
+    await form.locator("input[name=to]").fill(day(25));
+    await form.locator("input[name=reason]").fill("Painting");
+    await page.route("**/api/calendar/block", (route) =>
+      route.fulfill({
+        status: 504,
+        contentType: "text/html",
+        body: "<!DOCTYPE html><title>Gateway Timeout</title>",
+      }),
+    );
+    await form.getByRole("button", { name: "Hold dates" }).click();
+    await form
+      .getByText(/did not answer properly \(HTTP 504\)\. If you were saving/)
+      .waitFor();
+    assert.equal(await form.getByText(/Unexpected token/).count(), 0);
+    await page.unroute("**/api/calendar/block");
+    await form.getByRole("button", { name: "Cancel" }).click();
+  },
+);
+
 test("no unexpected browser errors or failed requests", { skip }, async () => {
-  // The overlap check answers 409 by design, and Chromium logs it.
+  // Expected by design: the overlap check answers 409, and the two tests
+  // above simulate a failed refresh (500) and a proxy timeout (504).
+  // Chromium logs each as a failed resource.
+  const expected = new Set([
+    "http 409 POST /api/calendar/block",
+    "http 500 GET /api/workspace",
+    "http 504 POST /api/calendar/block",
+  ]);
   const unexpected = problems.filter(
     (p) =>
-      p !== "http 409 POST /api/calendar/block" &&
-      !/^console: Failed to load resource: .* 409 \(Conflict\)$/.test(p),
+      !expected.has(p) &&
+      !/^console: Failed to load resource: .* (409 \(Conflict\)|500 \(Internal Server Error\)|504 \(Gateway Timeout\))$/.test(
+        p,
+      ),
   );
   assert.deepEqual(unexpected, []);
 });

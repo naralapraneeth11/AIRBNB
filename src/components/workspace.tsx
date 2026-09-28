@@ -70,6 +70,7 @@ const navigation = [
 export function Workspace({ section }: { section: string }) {
   const [data, setData] = useState<WorkspaceData | null>(null),
     [error, setError] = useState(""),
+    [stale, setStale] = useState(false),
     [dialog, setDialog] = useState<{
       title: string;
       content: ReactNode;
@@ -82,14 +83,17 @@ export function Workspace({ section }: { section: string }) {
     const next = await api<WorkspaceData>("workspace");
     setData(next);
     setError("");
+    setStale(false);
   }, []);
   useEffect(() => {
     let active = true;
     refresh().catch((e) => {
       if (active) setError(e.message);
     });
+    // A failed background refresh keeps the loaded workspace usable and says
+    // it may be out of date; it never replaces the page with an error.
     const interval = setInterval(() => {
-      if (!document.hidden) refresh().catch((e) => setError(e.message));
+      if (!document.hidden) refresh().catch(() => setStale(true));
     }, 60000);
     return () => {
       active = false;
@@ -114,7 +118,14 @@ export function Workspace({ section }: { section: string }) {
     method = "POST",
   ) => {
     const result = await api<T>(path, { method, data: payload });
-    await refresh();
+    // The change is saved. Reporting a failed refresh as a failed save would
+    // invite a retry of something that already happened; it only means the
+    // view may be out of date.
+    try {
+      await refresh();
+    } catch {
+      setStale(true);
+    }
     return result;
   };
   const explain = async (id: string) => {
@@ -332,16 +343,31 @@ export function Workspace({ section }: { section: string }) {
           </button>
         </header>
         <div className="page-content">
-          {error ? (
-            <ErrorBox
-              message={error}
-              retry={() => refresh().catch((e) => setError(e.message))}
-            />
-          ) : !data ? (
-            <Skeleton />
+          {!data ? (
+            error ? (
+              <ErrorBox
+                message={error}
+                retry={() => refresh().catch((e) => setError(e.message))}
+              />
+            ) : (
+              <Skeleton />
+            )
           ) : (
             context && (
               <Context.Provider value={context}>
+                {stale && (
+                  <div className="stale-notice" role="status">
+                    <span>
+                      Couldn’t refresh just now, so some of what you see may be
+                      out of date. Nothing you saved was lost.
+                    </span>
+                    <Button
+                      onClick={() => refresh().catch(() => setStale(true))}
+                    >
+                      Refresh
+                    </Button>
+                  </div>
+                )}
                 {section === "calendar" || section === "overview" ? (
                   <CalendarView />
                 ) : section === "inbox" ? (
