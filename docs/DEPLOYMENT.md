@@ -26,7 +26,7 @@ With the schema owner as `DIRECT_URL`, apply the migrations:
 pnpm db:migrate
 ```
 
-This applies, in order, `202609210001_initial`, `202609210002_security` (forced RLS, tenant-aware foreign keys, workflow checks, immutable-history triggers), `202609270001_operations_foundation` (scheduler lease and ticks, environment marker, backup evidence) and `202609270002_calendar_correctness` (the Phase 1 calendar model). Do not substitute `prisma db push`; it does not install the custom SQL protections.
+This applies, in order, `202609210001_initial`, `202609210002_security` (forced RLS, tenant-aware foreign keys, workflow checks, immutable-history triggers), `202609270001_operations_foundation` (scheduler lease and ticks, environment marker, backup evidence), `202609270002_calendar_correctness` (the Phase 1 calendar model) and `202609280001_accounts` (pending sign-ups, password reset links and guided setup progress; additive only, so it is safe to run before or after the code that uses it). Do not substitute `prisma db push`; it does not install the custom SQL protections.
 
 `202609270002_calendar_correctness` rebuilds the calendar model under the MIG 01 pre-launch exception. On a database that already exists, run it only after the product owner's written confirmation that no real host data exists and a verified backup, recorded in [RELEASE_GATES.md](RELEASE_GATES.md#mig-01-written-confirmation). `pnpm db:prelaunch-check` prints the row counts that confirmation relies on. The migration refuses to run over legacy calendar rows and keeps existing export links and cleaning tasks.
 
@@ -77,7 +77,13 @@ Copy `.env.example` locally and configure the required values:
 
 The administrative scripts load `.env`; platform environment variables supply values in deployment.
 
-In the controlled setup environment, set the four `BOOTSTRAP_*` fields and run `pnpm setup:owner` once. An existing owner email makes bootstrap fail without changing that account. It creates a workspace (in calendar shadow mode), the owner membership, paused automation and four draft response rules. Remove bootstrap secrets immediately afterward, then run `pnpm check:env` with the runtime connection: it checks encryption, the role's attributes, forced RLS, the pool sizes and the environment marker.
+Optional account settings (AUTH 01, AUTH 03):
+
+- `RESEND_API_KEY` and `EMAIL_FROM` (an address on a domain verified in Resend) turn on "Forgot your password?". Reset links are single use, last 30 minutes and sign the account out everywhere.
+- `SIGNUP_ENABLED=true` additionally opens self-service sign-up at `/signup`. Leave it unset for a supervised demo: you create each account with `pnpm setup:owner`, and nobody else can register. In `development` and `test` only, account emails without Resend are printed to the server log instead of sent.
+- `NEXT_PUBLIC_BRAND_NAME` sets the visible product name (default "Airbnb Automation"). It is built into the pages, so redeploy after changing it. Export links and other identifiers never change with it.
+
+In the controlled setup environment, set the four `BOOTSTRAP_*` fields and run `pnpm setup:owner` once (again with different values for each additional account you provision yourself). An existing owner email makes bootstrap fail without changing that account. It creates a workspace (in calendar shadow mode), the owner membership, paused automation and four draft response rules. Remove bootstrap secrets immediately afterward, then run `pnpm check:env` with the runtime connection: it checks encryption, the role's attributes, forced RLS, the pool sizes and the environment marker.
 
 Never commit `.env`, and never copy production guest data into staging or preview.
 
