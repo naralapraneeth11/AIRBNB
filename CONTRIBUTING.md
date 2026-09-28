@@ -10,6 +10,8 @@ This repository implements the Hostsphere product and engineering specification
   (`corepack enable` selects it automatically).
 - Install with `pnpm install --frozen-lockfile`. Do not edit the lockfile by
   hand; add or upgrade dependencies with `pnpm add`.
+- Install the PostgreSQL client (`psql`); the integration harness applies the
+  shipped grant script with it.
 - Copy `.env.example` to `.env` for local work. Never commit `.env`, real feed
   URLs, export tokens, guest data, or production database dumps.
 
@@ -20,17 +22,36 @@ pnpm typecheck
 pnpm lint
 pnpm format:check
 pnpm test                # unit, domain, fixture and property-based tests
-pnpm test:integration    # needs TEST_DATABASE_URL (a disposable PostgreSQL)
+pnpm test:integration    # needs TEST_DATABASE_URL (a disposable PostgreSQL server)
 pnpm build
+pnpm test:browser        # after a build; needs TEST_DATABASE_URL and Chromium
 pnpm audit:deps
 ```
 
-`pnpm test:integration` rebuilds the schema of the database in
-`TEST_DATABASE_URL`, so point it only at a disposable database. It connects the
-application through a `NOSUPERUSER NOBYPASSRLS` role so row-level security is
-exercised exactly as in production. Without `TEST_DATABASE_URL` the suite skips
-and says so; CI sets `REQUIRE_INTEGRATION_TESTS=1`, which turns a skip into a
-failure.
+`TEST_DATABASE_URL` is a **superuser** URL to a disposable PostgreSQL server,
+for example one started with
+`docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16`
+(`TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres`).
+Each integration and browser test file creates a fresh database there, applies
+the shipped migrations with `prisma migrate deploy` as a non-superuser owner and
+the shipped grants with `psql`, marks it `test`, and drops it afterwards. The
+application connects through a `NOSUPERUSER NOBYPASSRLS` role, so row-level
+security is exercised exactly as in production. The harness creates the roles
+`hs_it_owner` and `hs_it_app` on that server and resets their passwords on every
+run, so never point it at a server anything else uses, and do not run two
+suites against the same server at once.
+
+`pnpm test:browser` serves the production build with `next start` and drives it
+in Chromium at desktop and phone widths. Install the browser revision pinned by
+`playwright-core` once with `pnpm exec playwright-core install chromium`, or set
+`BROWSER_EXECUTABLE` to a compatible Chromium.
+
+Without `TEST_DATABASE_URL` (or a build, for the browser checks) those suites
+skip and say so. CI sets `REQUIRE_INTEGRATION_TESTS=1` and
+`REQUIRE_BROWSER_TESTS=1`, which turn a skip into a failure.
+
+`PROPERTY_RUNS` raises the number of randomized histories in
+`tests/calendar-properties.test.ts` (150 by default) for a longer local run.
 
 ## Calendar code rules
 
@@ -61,5 +82,5 @@ protections (RLS, composite keys, checks, triggers) live in migrations; never us
 - Keep secrets and personal data out of code, tests, fixtures, logs and
   screenshots. Calendar fixtures must be synthetic or anonymized with
   `pnpm fixtures:anonymize`.
-- CI must be green on the head commit. `main` is protected; see
-  `docs/RELEASE_GATES.md` for the required checks.
+- CI must be green on the head commit. `docs/RELEASE_GATES.md` lists the
+  checks branch protection on `main` requires.

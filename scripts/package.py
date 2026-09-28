@@ -5,10 +5,12 @@ import hashlib
 
 root = Path(__file__).resolve().parents[1]
 destination = root.parent / "Airbnb-Automation-Source.zip"
-folders = ("src", "prisma", "public", "scripts", "tests", "docs", ".github")
-files = ("README.md", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml",
-         "tsconfig.json", "next-env.d.ts", "next.config.ts", "vercel.json",
-         ".env.example", ".gitignore", ".prettierignore")
+folders = ("src", "prisma", "public", "scripts", "tests", "docs", "ops", ".github")
+files = ("README.md", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md",
+         "AGENTS.md", "CLAUDE.md", "package.json", "pnpm-lock.yaml",
+         "pnpm-workspace.yaml", "tsconfig.json", "next-env.d.ts", "next.config.ts",
+         "eslint.config.mjs", "vercel.json", ".env.example", ".gitignore",
+         ".prettierignore")
 paths = [root / file for file in files]
 paths += [p for folder in folders for p in (root / folder).rglob("*") if p.is_file()]
 paths = sorted(set(paths))

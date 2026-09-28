@@ -1,50 +1,51 @@
 # Deployment
 
-The supported production target is a Next.js application on Vercel with managed PostgreSQL, private Supabase Storage, and Vercel Cron. `pnpm worker` runs the same scheduler for local development or a dedicated process when cron capacity is insufficient; it is not a second application architecture.
+The supported production target is a Next.js application on Vercel with managed PostgreSQL, private Supabase Storage, and an external one-minute clock. `pnpm worker` runs the same scheduler tick for local development or as a dedicated process; it is not a second application architecture.
 
-## 1. PostgreSQL roles and migrations
+Each step below that closes a Phase 0 gate has a record in [RELEASE_GATES.md](RELEASE_GATES.md). Fill it in as you go.
 
-Use a dedicated database. The schema owner applies migrations; the application connects as a non-owner `NOSUPERUSER NOBYPASSRLS` role. Never use a managed provider's administrator or service role for `DATABASE_URL`. The server checks superuser and bypass-RLS attributes before tenant access; `pnpm check:env` also checks forced row-level security on key tables.
+## 1. PostgreSQL roles, migrations and grants
 
-Example below uses `airbnb` as the database name and `airbnb_app` as the runtime role. Adapt the names to your database. Run the role creation as an administrator; run grants after both migrations as the schema owner. Supply the runtime password through your database administrator or secret-management interface rather than committing a SQL password literal.
+Use a dedicated database per environment. The schema owner applies migrations; the application connects as a non-owner `NOSUPERUSER NOBYPASSRLS` role. Never use a managed provider's administrator or service role for `DATABASE_URL`. The server checks the role's superuser and bypass-RLS attributes and the database's environment marker before any tenant access; `pnpm check:env` also checks forced row-level security on every tenant table.
+
+The examples use `airbnb` as the database and `airbnb_app` as the runtime role. Create the role as an administrator and supply its password through your provider's secret interface, not a committed SQL literal:
 
 ```sql
 CREATE ROLE airbnb_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
   NOINHERIT NOREPLICATION NOBYPASSRLS;
 
 GRANT CONNECT ON DATABASE airbnb TO airbnb_app;
-GRANT USAGE ON SCHEMA public TO airbnb_app;
 
 -- This application expects a dedicated schema/database.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-REVOKE CREATE ON SCHEMA public FROM airbnb_app;
 ```
 
-Use your schema-owner connection as `DIRECT_URL` while running:
+With the schema owner as `DIRECT_URL`, apply the migrations:
 
 ```sh
 pnpm db:migrate
 ```
 
-This applies the initial schema and the second migration containing forced RLS, tenant-aware foreign keys, workflow checks, and immutable-history triggers. Do not substitute `prisma db push`; it does not install the custom SQL protections.
+This applies, in order, `202609210001_initial`, `202609210002_security` (forced RLS, tenant-aware foreign keys, workflow checks, immutable-history triggers), `202609270001_operations_foundation` (scheduler lease and ticks, environment marker, backup evidence) and `202609270002_calendar_correctness` (the Phase 1 calendar model). Do not substitute `prisma db push`; it does not install the custom SQL protections.
 
-Then grant only the application tables it uses:
+`202609270002_calendar_correctness` rebuilds the calendar model under the MIG 01 pre-launch exception. On a database that already exists, run it only after the product owner's written confirmation that no real host data exists and a verified backup, recorded in [RELEASE_GATES.md](RELEASE_GATES.md#mig-01-written-confirmation). `pnpm db:prelaunch-check` prints the row counts that confirmation relies on. The migration refuses to run over legacy calendar rows and keeps existing export links and cleaning tasks.
 
-```sql
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
-  "Workspace", "User", "Membership", "Session", "RateLimit",
-  "Listing", "SyncSource", "SyncRun", "Booking", "Cleaner",
-  "CleaningTask", "MagicLink", "Asset", "Thread", "Message",
-  "AutomationSettings", "AutomationRule", "Outbox", "Notification",
-  "PushSubscription", "Integration"
-TO airbnb_app;
+Then apply the shipped least-privilege grants, still as the schema owner:
 
-GRANT SELECT, INSERT ON TABLE "AuditLog", "DomainEvent" TO airbnb_app;
-REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "AuditLog", "DomainEvent"
-FROM airbnb_app;
+```sh
+psql "$DIRECT_URL" -v ON_ERROR_STOP=1 -v runtime_role=airbnb_app \
+  -f prisma/grants/runtime-role.sql
 ```
 
-There are no serial-ID sequences in the current schema. Do not grant the runtime role access to `_prisma_migrations`, table ownership, schema creation, or membership in the owner role. Do not add blanket default grants to future tables: review their tenant policy and grant only what the next release needs.
+The script is idempotent and revokes before it grants, so re-run it after every migration. It gives the runtime role only what the application uses: calendar and cleaning history without `DELETE`, append-only audit and domain events, update-only access to the scheduler lease, and read-only access to the environment marker and backup evidence. It never grants `_prisma_migrations`, ownership, schema creation, or default privileges on future tables.
+
+Mark the database with the environment it belongs to (SEC 04). Only the schema owner can write the marker:
+
+```sh
+pnpm db:mark-environment production --by "your name"
+```
+
+Use `staging`, `development` or `test` for the others. Changing an existing marker requires naming the current one (`--replace production`), so a typo cannot re-label production.
 
 Verify the runtime connection:
 
@@ -56,53 +57,90 @@ SELECT c.relname, pg_get_userbyid(c.relowner) AS owner,
        c.relrowsecurity, c.relforcerowsecurity
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = 'public' AND c.relname IN
-  ('Listing', 'Booking', 'Message', 'CleaningTask', 'AuditLog');
+  ('Listing', 'AvailabilityBlock', 'Reservation', 'Message', 'CleaningTask', 'AuditLog');
 ```
 
-`rolsuper` and `rolbypassrls` must both be false, the five table owners must differ from the runtime role, and both RLS flags must be true. Application operational tables return no tenant rows until a transaction sets `app.workspace_id`. Authentication/capability lookup tables are deliberately server-only and outside tenant RLS so a credential can resolve its workspace; they are not a public database API.
+`rolsuper` and `rolbypassrls` must both be false, the table owners must differ from the runtime role, and both RLS flags must be true. Tenant tables return no rows until a transaction sets `app.workspace_id`. Authentication and capability lookup tables are deliberately server-only and outside tenant RLS so a credential can resolve its workspace; they are not a public database API.
 
-`DATABASE_URL` may use your provider's Prisma-compatible pooled connection. Migrations and bootstrap use a direct owner connection. Use TLS according to the provider's configuration. Set connection limits within the database plan's capacity; Vercel function concurrency can multiply Prisma connection pools.
+`DATABASE_URL` may use your provider's Prisma-compatible pooled connection. Set the pool size explicitly per process (section 2 of the specification): `DATABASE_POOL_SIZE` for the web application and `WORKER_DATABASE_POOL_SIZE` for `pnpm worker`. Unset, they default to 1 per serverless function on Vercel, 3 for a local web server and 4 for the worker. Keep function concurrency × pool size within the database plan's connection limit.
 
-Keep privileged owner credentials in a migration/setup environment, not the production web function. Production can set `DIRECT_URL` to a direct **runtime-role** connection; only the controlled migration/bootstrap process overrides it with the schema-owner connection. The application serves requests using `DATABASE_URL`.
+Keep owner credentials in a controlled migration environment, never in the web deployment. Production sets `DIRECT_URL` to a direct **runtime-role** connection; only the migration and setup process overrides it with the schema owner.
 
 ## 2. Environment and owner bootstrap
 
-Copy `.env.example` locally and configure required secrets. `AUTH_SECRET` and `CRON_SECRET` each require at least 32 random characters. `ENCRYPTION_KEYS` is a JSON map of version identifiers to 32-byte base64 keys; `ENCRYPTION_KEY_ID` chooses the key for new writes.
+Copy `.env.example` locally and configure the required values:
 
-The administrative scripts load `.env`; platform environment variables can supply values in deployment. Use `APP_URL=http://localhost:3000` locally and the exact HTTPS canonical origin in production. Avoid signing in through a preview origin while `APP_URL` points to production: mutation origin checks will reject it.
+- `APP_ENVIRONMENT`: `production`, `staging`, `preview`, `development` or `test`. It must match the database marker; a `preview` deployment may use a database marked `staging` and nothing else.
+- `APP_URL`: `http://localhost:3000` locally and the exact HTTPS canonical origin in production. Mutation origin checks reject any other origin, so do not sign in through a preview URL while `APP_URL` points to production.
+- `AUTH_SECRET`, `CRON_SECRET` and `MONITOR_SECRET`: at least 32 random characters each, generated separately, different in every environment.
+- `ENCRYPTION_KEYS`: a JSON map of key identifiers to 32-byte base64 keys; `ENCRYPTION_KEY_ID` chooses the key for new writes.
 
-In the controlled setup environment, set the four `BOOTSTRAP_*` fields and run `pnpm setup:owner` once. An existing owner email makes bootstrap fail without changing that account. It creates a workspace, owner membership, paused controls, and four draft response rules. Remove bootstrap secrets immediately afterward. Re-run `pnpm check:env` with the runtime connection to check encryption and database protections.
+The administrative scripts load `.env`; platform environment variables supply values in deployment.
 
-Do not commit `.env` or copy production guest data into preview deployments. Preview environments need an isolated database, storage bucket, provider accounts where supported, and separate secrets.
+In the controlled setup environment, set the four `BOOTSTRAP_*` fields and run `pnpm setup:owner` once. An existing owner email makes bootstrap fail without changing that account. It creates a workspace (in calendar shadow mode), the owner membership, paused automation and four draft response rules. Remove bootstrap secrets immediately afterward, then run `pnpm check:env` with the runtime connection: it checks encryption, the role's attributes, forced RLS, the pool sizes and the environment marker.
+
+Never commit `.env`, and never copy production guest data into staging or preview.
 
 ## 3. Photo storage
 
-Create a **private** Supabase Storage bucket named `airbnb-private`, or set `STORAGE_BUCKET` to a different private bucket. Storage is required even when the database is hosted on Neon. Configure `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` only on the server.
+Create a **private** Supabase Storage bucket named `airbnb-private`, or set `STORAGE_BUCKET` to a different private bucket, separate per environment. Storage is required even when the database is hosted elsewhere. Configure `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` only on the server.
 
-The browser uploads to the application, never directly with the service key. Uploads accept JPEG, PNG, and WebP up to 4 MB. The server decodes, bounds pixel count, removes metadata by re-encoding, and stores a WebP image. Authenticated asset routes enforce workspace/cleaner scope and audit reads. Do not make the bucket public or add permissive anonymous-read policies.
+The browser uploads to the application, never directly with the service key. Uploads accept JPEG, PNG and WebP up to 4 MB. The server decodes, bounds pixel count, removes metadata by re-encoding, and stores a WebP image with its SHA-256. Authenticated asset routes enforce workspace and cleaner scope and audit reads. Do not make the bucket public or add anonymous-read policies.
 
-Photo upload failure keeps cleaning unverified. Validate real upload and authenticated retrieval before assigning live jobs.
+Photo upload failure keeps cleaning unverified. Validate a real upload and authenticated retrieval before assigning live jobs.
 
 ## 4. Vercel
 
-1. Import the new repository as a Next.js project. Select this directory as the root if it is nested in a larger repository. Use Node.js 22 or 24, install with `pnpm install --frozen-lockfile`, and build with `pnpm build`.
-2. Add runtime secrets to the production environment. Set the canonical HTTPS `APP_URL`. Do not expose provider, encryption, database, or HMAC secrets with a `NEXT_PUBLIC_` prefix. `NEXT_PUBLIC_SENTRY_DSN` is the sole optional public telemetry setting.
-3. Apply versioned migrations from a controlled release process before directing traffic to code that needs them. This repository does not run owner-credential migrations automatically on every web build.
-4. Deploy. Verify `GET /api/health`, sign-in, workspace reads, one reversible property change, and one real calendar import in the deployed environment.
-5. Check the Vercel plan supports the configured one-minute cron schedule and 60-second function duration. `vercel.json` invokes `/api/cron`; Vercel must send `Authorization: Bearer <CRON_SECRET>`.
+1. Import the repository as a Next.js project. Use Node.js 22 or 24, install with `pnpm install --frozen-lockfile`, and build with `pnpm build`.
+2. Add the environment variables per Vercel environment: production values only in Production, staging values in Preview (with `APP_ENVIRONMENT=preview`). Set the canonical HTTPS `APP_URL`. Do not expose provider, encryption, database or HMAC secrets with a `NEXT_PUBLIC_` prefix; `NEXT_PUBLIC_SENTRY_DSN` is the only public telemetry setting.
+3. Apply migrations and grants from the controlled release process before directing traffic to code that needs them. Web builds never run owner-credential migrations.
+4. Deploy. Verify `GET /api/health` (database reachable), `GET /api/health/operations?check=environment` with the monitor secret, sign-in, workspace reads, one reversible property change and one real calendar check.
 
-The cron route rejects missing or invalid authentication. Monitor actual cron invocation and sync timestamps; a deployed page alone does not prove the worker is running. Cron runs use bounded work, persisted scheduling, database leases, and idempotency keys. Larger portfolios may need increased worker throughput before the 60–120 second target can be maintained; the current code is not capacity-certified.
+`vercel.json` declares no cron jobs: the cadence Vercel Cron offers depends on the plan, and calendar protection needs one minute.
 
-For local operation, keep `pnpm worker` running alongside `pnpm dev`. It calls the same cron function once per minute. Do not rely on an open browser to run scheduled work. Source import polling continues when automatic messaging and cleaning are paused so availability remains observable.
+## 5. Scheduler clock and monitors
 
-## 5. Bring providers online
+An external clock calls `POST /api/cron` with `Authorization: Bearer <CRON_SECRET>` once a minute (ARCH 03). Each tick claims bounded durable work under a database lease, records what it claimed, completed and left behind in `SchedulerTick`, and releases the lease (OPS 01). A second caller during a tick is recorded as skipped and does no work, so the clock and `pnpm worker` can both run safely.
 
-Follow [INTEGRATIONS.md](INTEGRATIONS.md) to configure Twilio, Resend, OpenAI, web push, and an authorized OTA bridge. Use provider testing environments/approved destinations where available. A “Configured” indicator only detects environment values; verify actual receipts separately.
+Deploy the Cloudflare Worker in [`ops/clock`](../ops/clock/README.md), one per environment, or any scheduler that can send that authenticated request every minute. A deployed page does not prove the scheduler runs; the monitors do.
 
-Start with rules set to `DRAFT`, AI disabled, and global automation paused. Validate feeds first, then cleaning, then guest-message draft/approval workflows. Enable automatic sends only after checking the exact provider accounts and the property manual used by the responder.
+Configure four HTTP monitors per environment against `/api/health/operations`, each sending `Authorization: Bearer <MONITOR_SECRET>`: `check=heartbeat`, `check=progress`, `check=backups` and `check=environment`. Each returns 200 or 503 with timestamps and counts only, never tenant data. Thresholds and what each detects are in [`ops/clock/README.md`](../ops/clock/README.md#monitor).
 
-## 6. Release verification and rollback
+For local operation, run `pnpm worker` beside `pnpm dev`. Calendar checks continue while messaging and cleaning automation are paused, so availability stays observable.
 
-Run `pnpm typecheck`, `pnpm test`, and `pnpm build` before a release. The focused automated checks do not replace a provider-connected acceptance pass. Confirm tenant isolation with runtime credentials, cron progress, photo access, cleaner acceptance, and host draft approval in staging.
+## 6. Staging and previews
 
-Record the deployed commit and migration names. Keep a tested PostgreSQL backup and corresponding encryption keys before schema changes. Prefer backward-compatible migrations; rolling back application code does not reverse database migrations or recall external messages. Use the global pause while investigating an automation regression, stop schedulers if necessary, and preserve audit/outbox records for reconciliation.
+Staging is a separate project with its own database (marked `staging`), storage bucket, clock, monitors and secrets. Preview deployments use the staging database with `APP_ENVIRONMENT=preview`; the application refuses to serve a preview from a production database, and refuses `APP_ENVIRONMENT=production` inside a Vercel preview. Provider accounts should be test accounts or approved destinations where the provider supports them. The checklist is in [RELEASE_GATES.md](RELEASE_GATES.md#staging-isolation).
+
+## 7. Backups
+
+Nightly backups of Postgres, storage objects and encryption keys run as three GitHub Actions jobs in `.github/workflows/backup.yml`, off until configured. Setup, the offline key pair, restore and the drill are in [OPERATIONS.md](OPERATIONS.md#backups-and-restore). Create the backup role as an administrator:
+
+```sh
+psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -v backup_role=hostsphere_backup \
+  -v database=airbnb -f prisma/grants/backup-role.sql
+```
+
+## 8. Calendar go-live
+
+Every workspace starts in calendar **shadow mode** (REL 01): checks run and decisions are recorded, but export links answer "not active yet", and calendar alerts and turnover changes are withheld. Platforms keep their current calendars meanwhile.
+
+After seven representative days, print the review with `pnpm calendar:shadow-report <workspace-id> --days 7 --markdown`, adjudicate every item against the platforms' own calendars, and record it in [RELEASE_GATES.md](RELEASE_GATES.md#shadow-review). Then:
+
+```sh
+pnpm calendar:mode <workspace-id> LIVE --reviewed "<link to the review>"
+```
+
+This serves export links and creates the turnover work shadow mode withheld, one property at a time; an interrupted run is safe to repeat. `pnpm calendar:mode <workspace-id> SHADOW --reason "<why>"` stops new effects without removing work already created. Only after going live should the host import each connection's export link into its platform.
+
+## 9. Bring providers online
+
+Follow [INTEGRATIONS.md](INTEGRATIONS.md) to configure Twilio, Resend, OpenAI, web push and an authorized OTA bridge. A "Configured" indicator only detects environment values; verify actual receipts separately.
+
+Start with rules in `DRAFT`, AI disabled and global automation paused. Validate calendar checks first, then cleaning, then guest-message drafts and approvals. Enable automatic sends only after checking the exact provider accounts and the property manual the responder uses.
+
+## 10. Release verification and rollback
+
+Before a release, run the same gates CI runs (see [CONTRIBUTING.md](../CONTRIBUTING.md)): `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test`, `pnpm test:integration`, `pnpm build`, `pnpm test:browser` and `pnpm audit:deps`. Automated checks do not replace a provider-connected acceptance pass in staging: tenant isolation with runtime credentials, scheduler progress, photo access, cleaner acceptance and draft approval.
+
+Record the deployed commit, the applied migrations, the capability table version (`CAPABILITIES_VERSION`), workspace calendar modes, and the rollback procedure. Keep a verified backup and its encryption keys before any schema change. Rolling back application code does not reverse migrations or recall external messages. While investigating a regression, use the global automation pause, return an affected workspace to calendar shadow mode, stop the clock if necessary, and preserve audit and outbox records for reconciliation.

@@ -4,17 +4,51 @@ External providers are configured by the operator. The repository does not inclu
 
 ## Calendar feeds
 
-In Properties → Channels, connect each channel's HTTPS export-calendar URL. Add that URL's exact hostname to `ICAL_ALLOWED_HOSTS` first. Entries are comma-separated; `*.example.com` permits subdomains but not the bare `example.com`. The default list is a starting configuration, not a claim that every platform account offers calendar export at those hosts.
+Each property connects one calendar per platform account in Properties → Channels. A connection normally works both ways: the application **imports** the platform's export link, and gives back an **export link** made for that platform to import. A connection without an import link is export-only, for example an all-channel link for a destination that only reads calendars. Two accounts on the same platform are two connections; event identity is scoped to its connection (DATA 02).
 
-The HTTP client accepts HTTPS on port 443, rejects URL credentials, rejects private/reserved DNS destinations, pins the resolved address, does not follow redirects, limits response size, and times out. Use the provider's final feed URL. Do not broaden the allowlist to arbitrary user-controlled hosts to work around a rejected URL.
+### Capabilities
 
-Connecting a source returns a channel-specific export URL. Import that URL into the **same** channel. Its availability excludes reservations originating from that channel while preserving buffers, reducing loops. The master export includes all protected dates. Generated UIDs end in `@airbnb-automation` and are ignored when echoed back by a source.
+The reviewed capability table in `src/domain/calendar/capabilities.ts` ships with the code and is versioned with each release (`CAPABILITIES_VERSION`). Only what it marks as supported appears as a product action.
 
-An export URL is a bearer capability. Only its hash is stored; the feed contains “Unavailable,” dates, and stable opaque event IDs—not guest names, prices, contacts, or door codes. Treat URLs as secrets. Rotating a property's master feed invalidates only its master URL. Reconnecting a channel rotates that channel's export token; update the channel import setting afterward.
+| Platform        | Import link                                 | Export link | Notes                                                                                                   |
+| --------------- | ------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------- |
+| Airbnb          | `airbnb.com` and its regional domains       | Yes         | Airbnb imports external calendars about every 3 hours; checking more often here cannot change that      |
+| Vrbo            | `vrbo.com`                                  | Yes         | Import horizon and account eligibility differ from Airbnb                                               |
+| Booking.com     | `booking.com` (where the account offers it) | Yes         | Every closed date reads "CLOSED - Not available", so stays and closures cannot be told apart (CLASS 02) |
+| Expedia         | Unavailable                                 | No          | Kept unavailable until a supported route is verified (D04)                                              |
+| Google Calendar | `google.com`                                | Yes         | A manual availability source; its events start unclassified                                             |
+| Other calendar  | Any public HTTPS host                       | Yes         | A manual availability source; its events start unclassified                                             |
 
-The importer supports all-day stay ranges, recurrence expansion within a bounded window, exceptions, explicit cancellations, conditional requests, and retries with backoff. A missing reservation remains protected; after two observed missing polls it requires host review. Explicit source cancellation is distinguished from simple disappearance. Confirmation preference uses a feed creation/timestamp value when available, then first observation; iCal cannot prove a confirmation time the source does not provide.
+`ICAL_ALLOWED_HOSTS` optionally restricts Google and other calendars to listed hostnames (comma-separated; `*.example.com` permits subdomains but not the bare domain). Platform links are always checked against the table's exact registrable domains.
 
-Calendar import success means the app fetched the source successfully. It does not certify that the destination channel has imported the app's most recent feed. Confirm both directions in each actual channel account.
+No label rule is verified yet (see [RELEASE_GATES.md](RELEASE_GATES.md#recorded-exceptions)), so each import connection asks its host once how its blocks count (CLASS 02): all guest reservations, all owner closures, by label, or classify each block individually. Until the host answers, blocks stay Unknown: protected, with no turnover work. The answer is stored with who gave it, when, and the sample of events shown, and can be changed at any time.
+
+### Fetching
+
+The fetcher identifies itself as `Hostsphere-CalendarFetcher/1.0 (+<APP_URL>/fetcher)`; the `/fetcher` page explains what it is and gives `FETCHER_CONTACT` (FETCH 02). It:
+
+- accepts only HTTPS on port 443 without URL credentials; a plaintext link is offered its HTTPS form and never fetched;
+- resolves the host, refuses private, loopback, link-local and other reserved addresses, and connects to the resolved address it checked;
+- follows at most three redirects, validating every hop by the same rules;
+- applies one deadline across DNS, redirects and the body, and a size limit after decompression;
+- sends conditional requests (`If-None-Match`, `If-Modified-Since`) and honors `Retry-After` on 429 and 503 without ever retrying earlier;
+- checks each connection about every 15 minutes (5 near a stay) with jitter, backs off after failures from 5 to 60 minutes, and stays within a per-platform budget per scheduler tick. A manual "Check now" is limited to once a minute.
+
+Use the platform's own export link. Do not route feeds through proxies or disguise the client to evade a platform's limits.
+
+### What a check means
+
+A check is an observation, not the platform's reservation ledger (INT 02). Feeds may omit guests, hide cancellation reasons, shorten their date range or include owner closures. The engine therefore never releases dates on its own: a failed, partial, empty or suddenly shrunken feed can add protection but not remove it; a stay absent from two complete, healthy checks at least 15 minutes apart is sent to the host; an explicit cancellation waits for the host too; and a stay beyond the calendar's current range is never read as cancelled. Each connection shows what its last check observed, the dates its source covers, when it last succeeded and when the next check is due. "Some events need review" and "Could not check; existing dates remain protected" are results, not errors to hide.
+
+Raw feed bodies and event descriptions are not stored. Each check keeps a bounded, encrypted comparison snapshot and counts.
+
+### Export links
+
+Each connection's export link serves every protected date of its property except that destination's own stays; their buffer days are kept. Every event reads "Unavailable" with dates and a stable opaque UID: `<blockId>@airbnb-automation`, and `<blockId>-pre@airbnb-automation` / `-post@airbnb-automation` for buffer days. That format is frozen (D15). The UIDs are recognized when a platform echoes them back: this property's own are excluded, an unknown one stays protected for review. Nothing in an export names a guest, price, contact or code.
+
+An export link is a bearer capability. Only its token hash is stored. Responses carry a strong `ETag` and answer `If-None-Match` with 304 and `HEAD` without a body. Each request is recorded by class (body, not modified, head, revoked token, unavailable), which is what the connection detail shows as "Retrieved through this link". That is evidence a client fetched a version, not that the platform applied it (EXPORT 02). Confirm both directions in each platform account.
+
+Rotating an export link (owner only) revokes its token generation immediately; requests with the old token are counted for 90 days so you can see whether a platform still uses it. While a workspace is in calendar shadow mode, export links answer 503 "not active yet" with `Retry-After`, so platforms keep their current calendars.
 
 ## Authorized native-messaging bridge
 
@@ -43,7 +77,7 @@ X-STR-Signature: <lowercase HMAC-SHA256 hex>
 }
 ```
 
-Allowed platforms: `AIRBNB`, `VRBO`, `EXPEDIA`, `BOOKING`, `DIRECT`. IDs are nonempty strings up to 100 characters; message text is nonempty, up to 12,000 characters. Total raw request body must not exceed 64,000 bytes. `sentAt` is an ISO UTC timestamp. The referenced booking must belong to the workspace and match the platform; an existing thread cannot be rebound to another booking.
+`bookingId` is the application's reservation ID; the field keeps its name for bridge compatibility. Allowed platforms: `AIRBNB`, `VRBO`, `EXPEDIA`, `BOOKING`, `DIRECT`. IDs are nonempty strings up to 100 characters; message text is nonempty, up to 12,000 characters. Total raw request body must not exceed 64,000 bytes. `sentAt` is an ISO UTC timestamp. The referenced booking must belong to the workspace and match the platform; an existing thread cannot be rebound to another booking.
 
 Compute the signature over the **exact UTF-8 bytes transmitted**, with no subsequent JSON reformatting:
 
@@ -94,11 +128,11 @@ The application does not automatically retry an uncertain irreversible send. A h
 
 ### Direct guest email
 
-Create a direct reservation from the calendar with the property, guest, email, dates, and optional price. The backend checks availability including buffers, encrypts guest fields, creates its conversation, and exports the reservation's protected dates. `POST /api/bookings` accepts the same host-authorized workflow with a UUID idempotency key; it is not an unauthenticated public booking engine or payment processor.
+Create a direct reservation from the calendar with the property, guest, email, dates, and optional price. An overlap with protected dates or buffer days is shown first and must be acknowledged; saving then opens an overlap case instead of rejecting either stay (MANUAL 01, CONFLICT 01). The backend encrypts guest fields, creates the conversation, and exports the reservation's protected dates. `POST /api/bookings` accepts the same host-authorized workflow with a UUID idempotency key; it is not an unauthenticated public booking engine or payment processor.
 
-For `DIRECT` threads, outbound replies go to the booking's encrypted email address via Resend rather than the native bridge. Configure a verified `EMAIL_FROM` and `RESEND_API_KEY`; the outbox key is passed as Resend's `Idempotency-Key`.
+For `DIRECT` threads, outbound replies go to the reservation's encrypted email address via Resend rather than the native bridge. Configure a verified `EMAIL_FROM` and `RESEND_API_KEY`; the outbox key is passed as Resend's `Idempotency-Key`.
 
-A direct-booking guest's inbound email still needs an adapter that verifies the email provider webhook, maps the email conversation to the application booking, and sends the signed normalized inbound event above. Direct reservations use their application booking ID as the external thread ID. The app is not an IMAP mailbox or an email-deliverability service. Configure a `DIRECT` integration to authorize those inbound events; its outbound endpoint is not used for direct email replies.
+A direct-booking guest's inbound email still needs an adapter that verifies the email provider webhook, maps the email conversation to the application reservation, and sends the signed normalized inbound event above. Direct reservations use their application reservation ID as the external thread ID. The app is not an IMAP mailbox or an email-deliverability service. Configure a `DIRECT` integration to authorize those inbound events; its outbound endpoint is not used for direct email replies.
 
 ## Cleaner SMS
 
