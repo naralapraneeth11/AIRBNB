@@ -19,7 +19,7 @@ jobs:
   verify:
     name: Typecheck, lint, tests, build
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16
@@ -78,6 +78,14 @@ jobs:
 
       - name: Production build
         run: pnpm build
+
+      - name: Chromium for the browser checks (the revision pinned by playwright-core)
+        run: pnpm exec playwright-core install --with-deps --only-shell chromium
+
+      - name: Targeted browser checks (production build, Chromium, desktop and phone widths)
+        run: pnpm test:browser
+        env:
+          REQUIRE_BROWSER_TESTS: "1"
 
   dependency-audit:
     name: Dependency audit (high and critical)
