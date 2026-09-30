@@ -4,6 +4,36 @@ A check counts as passed only when it ran (QA 03). This file records runs, not
 intentions; gate status and remaining operator work are in
 [RELEASE_GATES.md](RELEASE_GATES.md).
 
+## Inbox reliability, calendar dates and phone navigation: September 30, 2026
+
+Run locally against the working tree of the commit that adds this entry.
+Same environment as below.
+
+| Gate (CI order)                  | Result                                                                                                                                                                                                                                |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm install --frozen-lockfile` | Passed                                                                                                                                                                                                                                |
+| `pnpm typecheck`                 | Passed                                                                                                                                                                                                                                |
+| `pnpm lint`                      | Passed: 0 errors, 16 warnings (19 before; the rewritten Inbox has 1 where it had 4)                                                                                                                                                   |
+| `pnpm format:check`              | Passed                                                                                                                                                                                                                                |
+| `pnpm test`                      | 100 passed, 0 failed, 0 skipped (adds calendar ranges across clock changes in five time zones)                                                                                                                                        |
+| `pnpm test:integration`          | 29 passed, 0 failed, 0 skipped (adds the Inbox list, paging, read logging, reply retries and workspace isolation)                                                                                                                     |
+| `pnpm build`                     | Passed                                                                                                                                                                                                                                |
+| `pnpm test:browser`              | 26 passed, 0 failed, 0 skipped (adds the clock-change week, and 11 Inbox checks: late answers, drafts, a lost send answer, older messages, refresh failures, filters, queued replies, phone list and Back, and the navigation drawer) |
+| `pnpm audit:deps`                | Passed: only the recorded exception GHSA-ggr8-5vv4-36mx                                                                                                                                                                               |
+
+The calendar range test fails against the previous 24-hour arithmetic, and
+the reply retry test against the previous reply handling. With the previous
+Inbox and navigation code built and the new browser checks run against it,
+9 of the 11 Inbox checks failed; the two that passed check that a retried
+send reuses its key, which the old code also did, and that nothing else
+failed. The new screens were reviewed by eye at desktop and phone widths,
+which led to one fix (a "select a guest" message shown while the list was
+still loading).
+
+Not verified here: screen readers (the drawer and list behaviour were
+checked through focus and the accessibility attributes, not with VoiceOver
+or TalkBack), and the hosted deployment.
+
 ## Accounts, guided setup and fixes: September 28, 2026 (later)
 
 Run locally against the working tree of the commit that adds this entry (code

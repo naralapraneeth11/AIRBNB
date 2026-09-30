@@ -326,6 +326,39 @@ test(
   },
 );
 
+test("the week the clocks go back loads its last day", { skip }, async () => {
+  // Sunday 1 November 2026 lasts 25 hours in New York.
+  const eastern = await browser!.newContext({
+    viewport: { width: 1440, height: 1000 },
+    timezoneId: "America/New_York",
+    locale: "en-US",
+    storageState: await desktop!.storageState(),
+  });
+  try {
+    const view = await eastern.newPage();
+    watch(view);
+    await view.clock.setFixedTime(new Date("2026-10-28T16:00:00Z"));
+    const ranges: string[] = [];
+    view.on("request", (r) => {
+      const url = new URL(r.url());
+      if (url.pathname === "/api/calendar") ranges.push(url.search);
+    });
+    await view.goto(`${base}/calendar`);
+    await view.getByRole("button", { name: "Week", exact: true }).click();
+    await view.waitForResponse(
+      (r) =>
+        new URL(r.url()).pathname === "/api/calendar" &&
+        new URL(r.url()).searchParams.get("from") === "2026-10-26",
+    );
+    assert.ok(
+      ranges.includes("?from=2026-10-26&to=2026-11-02"),
+      `ranges requested: ${ranges.join(", ")}`,
+    );
+  } finally {
+    await eastern.close();
+  }
+});
+
 test(
   "a save whose follow-up refresh fails is reported as saved, with a stale-data notice",
   { skip },

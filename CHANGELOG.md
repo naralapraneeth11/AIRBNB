@@ -4,7 +4,71 @@ Notable changes, newest first. Requirement identifiers refer to the Hostsphere
 Product and Engineering Specification v1.1. Gate evidence lives in
 [docs/RELEASE_GATES.md](docs/RELEASE_GATES.md).
 
-## Unreleased: self-service accounts, guided setup and fixes
+## Unreleased: Inbox reliability, calendar dates and phone navigation
+
+### Before you upgrade
+
+- **Nothing to run.** No migration and no new settings.
+- **Inbox addresses changed.** The open conversation and the filters are
+  now part of the address (`/inbox?thread=…&platform=…`), so a reload, a
+  shared link and Back show the same thing. Older `/inbox?thread=…` and
+  `/inbox?reservation=…` links still work.
+
+### Fixed
+
+- **A reply could go to a different guest than the one on screen.** A
+  late answer for the previously open conversation could replace the one
+  just chosen while Send still posted to the chosen one. Only the latest
+  request can now update the screen, and Send always goes to the
+  conversation shown.
+- **Calendar:** in a week (or some month views) ending on the day clocks go
+  back, the last day's stays were not loaded, such as a check-in on Sunday
+  1 November 2026 in New York or 25 October 2026 in London.
+- **Long conversations hid their newest messages:** only the oldest 500
+  were loaded. Conversations now open on their newest messages, and
+  "Show earlier messages" loads older ones without moving the reader.
+- **Drafts were lost** when switching conversations, when a stay's
+  conversation opened from the calendar re-selected itself every few
+  seconds, or when words were typed while a reply was being sent. Each
+  conversation keeps its own draft, and sending clears only the words
+  that were sent. Drafts are not saved in the browser, since replies can
+  contain guest details on shared devices.
+- **Retries:** a reply retried after a lost answer is never sent twice,
+  and the message says retrying is safe. A retry with different words is
+  refused instead of silently dropped, and a retried suggestion approval
+  that had already gone through no longer reports a failure.
+- **Refresh failures** in the Inbox no longer show a permanent error; the
+  conversation stays on screen with a "may be out of date" notice. Empty
+  states appear only after a successful empty answer, with loading
+  placeholders before that.
+- **Filters:** while new results load, the old list is marked as updating
+  and cannot be used, and a conversation outside the new results is not
+  kept open.
+- **Inbox actions** (manual takeover, resolve, dismiss, approve) can no
+  longer be triggered twice while one is in progress, and show success only
+  once the server confirms it. Queued replies are drawn differently from
+  sent ones and read "Queued, not sent yet".
+- **Phones:** the Inbox shows the list or one conversation, with "All
+  conversations" and the browser's Back returning to the list where it
+  was, including after opening a conversation straight from a link.
+- **Phone navigation drawer:** when closed it was still reachable with Tab
+  and by screen readers; when open, focus could leave it. Closed, it is
+  now hidden; open, the page behind it is inert, focus stays inside,
+  Escape closes it, and focus returns to the menu button.
+
+### Changed
+
+- The Inbox list ran two database queries per conversation on every
+  refresh (up to 400); it now runs three for its data, however many
+  conversations there are. An open conversation
+  refreshes every 5 seconds and the list every 20 (previously both every
+  2.5), refreshes pause while the tab is hidden, never overlap, and slow
+  down after failures.
+- Reading conversations is recorded in the audit log once per person and
+  conversation every 10 minutes, instead of on every automatic refresh
+  (about 2,900 entries an hour per open Inbox).
+
+## Self-service accounts, guided setup and fixes ([#2](https://github.com/naralapraneeth11/AIRBNB/pull/2))
 
 ### Before you upgrade
 
