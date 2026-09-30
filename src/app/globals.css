@@ -1220,13 +1220,67 @@ dd {
   align-items: center;
   margin: 10px 0 19px;
 }
-.inbox-filters .button {
+.inbox-status {
   margin-left: auto;
+  font-size: 0.8rem;
+  color: var(--muted);
 }
 .inbox-layout {
   display: grid;
-  grid-template-columns: 250px minmax(320px, 1fr) 230px;
+  grid-template-columns: 250px minmax(0, 1fr);
   min-height: 680px;
+}
+.conversation-pane {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) 230px;
+  align-content: start;
+  min-width: 0;
+}
+.conversation-pane:focus {
+  outline: none;
+}
+/* The way back to the list exists only where the list is hidden (phones). */
+.conversation-back {
+  display: none;
+}
+.conversation-status,
+.conversation-loading {
+  grid-column: 1 / -1;
+  padding: 22px;
+}
+.thread-list.updating {
+  opacity: 0.55;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+.threads-loading {
+  padding: 14px;
+}
+.thread-skeleton {
+  height: 92px;
+  margin-bottom: 12px;
+}
+.heading-skeleton {
+  height: 38px;
+  width: 40%;
+  margin-bottom: 30px;
+}
+.bubble-skeleton {
+  height: 64px;
+  width: 62%;
+  margin-bottom: 20px;
+}
+.bubble-skeleton.host {
+  margin-left: auto;
+}
+.older-messages {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 22px;
+}
+.messages-empty {
+  color: var(--muted);
+  text-align: center;
 }
 .thread-list {
   border-right: 1px solid var(--line);
@@ -1329,6 +1383,15 @@ dd {
 .message.host .bubble {
   background: var(--accent-soft);
   border-radius: 12px 12px 3px 12px;
+}
+/* Accepted by this app but not yet by the messaging service. */
+.message.queued .bubble {
+  background: transparent;
+  border: 1px dashed color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+.message.uncertain small {
+  color: var(--warning);
+  font-weight: 500;
 }
 .message small {
   display: flex;
@@ -2385,6 +2448,9 @@ td {
   .inbox-layout {
     grid-template-columns: 230px minmax(280px, 1fr);
   }
+  .conversation-pane {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .guest-context {
     display: none;
   }
@@ -2626,28 +2692,18 @@ td {
   .agenda-row > span {
     font-size: 0.8rem;
   }
+  /* Phones: the list, or one conversation with a way back to the list. */
   .inbox-layout {
     display: block;
+    min-height: 0;
   }
   .thread-list {
-    display: flex;
     border-right: 0;
-    border-bottom: 1px solid var(--line);
-    overflow: auto;
-    max-width: 100%;
-    max-height: 190px;
+    max-height: none;
+    overflow: visible;
   }
   .thread {
-    min-width: 240px;
-    width: 240px;
-    max-width: 80%;
-    border-left: 0;
-    border-bottom: 2px solid transparent;
     padding: 17px;
-  }
-  .thread.selected {
-    border-left: 0;
-    border-bottom-color: var(--accent);
   }
   .thread .avatar {
     width: 27px;
@@ -2656,15 +2712,29 @@ td {
   .thread .badge {
     font-size: 0.7rem;
   }
+  .inbox.has-selection .thread-list,
+  .inbox.has-selection .page-heading,
+  .inbox.has-selection .inbox-filters,
+  .inbox.has-selection .shadow-banner,
+  .inbox:not(.has-selection) .conversation-empty,
+  .inbox:not(.has-selection) .conversation-placeholder {
+    display: none;
+  }
+  .conversation-pane {
+    display: block;
+  }
+  .conversation-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 15px 16px 3px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--accent);
+  }
   .messages {
     min-height: 320px;
-  }
-  .conversation-empty {
-    padding: 45px 20px;
-    min-height: 340px;
-  }
-  .conversation-empty h2 {
-    font-size: 1.25rem;
+    max-height: 58vh;
   }
   .conversation-heading {
     padding: 18px;
@@ -2819,15 +2889,22 @@ td {
   }
 }
 @media (max-width: 540px) {
+  /* A closed drawer is hidden, not just moved off screen, so keyboards and
+     screen readers skip it; it hides once it has finished sliding away. */
   .sidebar,
   .collapsed .sidebar {
     transform: translateX(-100%);
-    transition: transform 0.18s ease-out;
+    visibility: hidden;
+    transition:
+      transform 0.18s ease-out,
+      visibility 0s linear 0.18s;
     width: 226px;
     padding: 28px 16px;
   }
   .mobile-open .sidebar {
     transform: translateX(0);
+    visibility: visible;
+    transition: transform 0.18s ease-out;
   }
   .mobile-open .brand-label,
   .mobile-open .nav-caption,
@@ -3070,9 +3147,6 @@ td {
   }
   .composer .button {
     font-size: 0.8rem;
-  }
-  .thread {
-    min-width: 220px;
   }
   .form-grid {
     grid-template-columns: 1fr;

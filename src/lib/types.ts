@@ -224,11 +224,13 @@ export type Message = {
   sentAt: string | null;
   createdAt: string;
 };
-export type Conversation = {
+/** Messages oldest first; `hasOlder` says whether earlier ones remain. */
+export type MessagePage = { messages: Message[]; hasOlder: boolean };
+/** A conversation opens on its newest page of messages. */
+export type Conversation = MessagePage & {
   thread: Thread;
   reservation: Reservation;
   pastStays: number;
-  messages: Message[];
 };
 export type Insights = {
   from: string;
