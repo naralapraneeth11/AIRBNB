@@ -406,17 +406,29 @@ export async function reply(
     where: { workspaceId: ctx.workspaceId, id: threadId },
   });
   ensure(thread, 404, "NOT_FOUND", "Conversation not found.");
+  // A retry after a lost response must not send twice, and must not report
+  // a failure for a reply that was accepted: the same request again returns
+  // what the first one did. A key that comes back with different words is a
+  // different reply, and is refused rather than silently dropped.
   let message;
   if (draftId) {
-    message = await tx.message.findFirst({
-      where: {
-        workspaceId: ctx.workspaceId,
-        id: draftId,
-        threadId,
-        status: "DRAFT",
-      },
+    const draft = await tx.message.findFirst({
+      where: { workspaceId: ctx.workspaceId, id: draftId, threadId },
     });
-    ensure(message, 409, "DRAFT_CHANGED", "This draft is no longer available.");
+    if (
+      draft &&
+      draft.sender === "HOST" &&
+      !draft.automated &&
+      !["DRAFT", "DISMISSED"].includes(draft.status) &&
+      decrypt(draft.bodyEncrypted, ctx.workspaceId) === body
+    )
+      return { id: draft.id, status: draft.status };
+    ensure(
+      draft?.status === "DRAFT",
+      409,
+      "DRAFT_CHANGED",
+      "This draft is no longer available.",
+    );
     message = await tx.message.update({
       where: { id: draftId },
       data: {
@@ -427,11 +439,7 @@ export async function reply(
       },
     });
   } else {
-    const incoming = await tx.message.findFirst({
-      where: { workspaceId: ctx.workspaceId, threadId, sender: "GUEST" },
-      orderBy: { createdAt: "desc" },
-    });
-    message = await tx.message.upsert({
+    const earlier = await tx.message.findUnique({
       where: {
         workspaceId_threadId_externalId: {
           workspaceId: ctx.workspaceId,
@@ -439,7 +447,22 @@ export async function reply(
           externalId: "host:" + key,
         },
       },
-      create: {
+    });
+    if (earlier) {
+      ensure(
+        decrypt(earlier.bodyEncrypted, ctx.workspaceId) === body,
+        409,
+        "IDEMPOTENCY_KEY_REUSED",
+        "A different reply was already sent with this request. Reload the conversation before sending again.",
+      );
+      return { id: earlier.id, status: earlier.status };
+    }
+    const incoming = await tx.message.findFirst({
+      where: { workspaceId: ctx.workspaceId, threadId, sender: "GUEST" },
+      orderBy: { createdAt: "desc" },
+    });
+    message = await tx.message.create({
+      data: {
         workspaceId: ctx.workspaceId,
         threadId,
         externalId: "host:" + key,
@@ -448,7 +471,6 @@ export async function reply(
         status: "QUEUED",
         replyToId: incoming?.id,
       },
-      update: {},
     });
   }
   await enqueue(

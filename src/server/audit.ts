@@ -23,6 +23,34 @@ export async function audit(
     },
   });
 }
+/** How long one READ entry covers the same person reading the same thing. */
+export const READ_AUDIT_WINDOW_MS = 10 * 60_000;
+/**
+ * Record that a person read decrypted data, at most once per window for the
+ * same person and entity. Open screens refresh themselves every few seconds;
+ * an entry per refresh would bury the log without saying anything new.
+ */
+export async function auditRead(
+  tx: Tx,
+  ctx: Context,
+  entity: string,
+  entityId: string | null,
+  reason: string,
+  now = new Date(),
+) {
+  const recent = await tx.auditLog.findFirst({
+    where: {
+      workspaceId: ctx.workspaceId,
+      actorId: ctx.actorId,
+      action: "READ",
+      entity,
+      entityId,
+      createdAt: { gt: new Date(now.getTime() - READ_AUDIT_WINDOW_MS) },
+    },
+    select: { id: true },
+  });
+  if (!recent) await audit(tx, ctx, "READ", entity, entityId, reason);
+}
 export async function event(
   tx: Tx,
   ctx: Context,
