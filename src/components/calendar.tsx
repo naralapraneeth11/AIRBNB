@@ -18,6 +18,7 @@ import {
 import { useWorkspace } from "./workspace";
 import { api, APIError, label, localDate, dateTime, money } from "@/lib/client";
 import { dayAdd, dateOnly } from "@/lib/domain";
+import { calendarGrid } from "@/lib/calendar-grid";
 import {
   CLASS_LABEL,
   CONFLICT_LABEL,
@@ -127,27 +128,8 @@ export function CalendarView() {
   const drag = useRef<string | null>(null),
     grid = useRef<HTMLDivElement>(null),
     opened = useRef(false);
-  const d = new Date(anchor + "T12:00:00"),
-    monthStart = new Date(d.getFullYear(), d.getMonth(), 1);
-  const start =
-    mode === "Month"
-      ? new Date(
-          monthStart.getFullYear(),
-          monthStart.getMonth(),
-          1 - ((monthStart.getDay() + 6) % 7),
-        )
-      : new Date(
-          d.getFullYear(),
-          d.getMonth(),
-          d.getDate() - ((d.getDay() + 6) % 7),
-        );
-  const days = Array.from(
-    { length: mode === "Month" ? 42 : 7 },
-    (_, i) =>
-      new Date(start.getFullYear(), start.getMonth(), start.getDate() + i),
-  );
-  const from = localDate(days[0]),
-    to = localDate(new Date(days.at(-1)!.getTime() + 86400000));
+  const d = new Date(anchor + "T12:00:00");
+  const { days, from, to } = calendarGrid(anchor, mode);
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);

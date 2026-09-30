@@ -57,10 +57,11 @@ import { dayAdd } from "@/lib/domain";
 import { body, bytes, formBody, json, range } from "./http";
 import { calendarRoutes } from "./routes/calendar";
 import { onboardingRoutes } from "./routes/onboarding";
+import { inboxRoutes } from "./routes/inbox";
 import { operationsHealth } from "./routes/operations";
 import { createConnection } from "./calendar/actions";
 import { propertySettingsChanged } from "./calendar/commit";
-import { connectionDTO, reservationDTO } from "./calendar/dto";
+import { connectionDTO } from "./calendar/dto";
 import { serveExport } from "./calendar/serve";
 
 /** Resolve no sooner than `ms`, so response time does not reveal the path taken. */
@@ -801,212 +802,29 @@ export async function handle(request: NextRequest) {
         201,
       );
     }
-    if (path[0] === "threads") {
-      if (method === "GET" && path.length === 1)
-        return json(
-          await tenant(ctx, async (tx) => {
-            const q = request.nextUrl.searchParams;
-            const threads = await tx.thread.findMany({
-              where: {
-                workspaceId: ctx.workspaceId,
-                ...(q.get("listing") ? { listingId: q.get("listing")! } : {}),
-                ...(q.get("platform") ? { platform: q.get("platform")! } : {}),
-                ...(q.get("status") ? { status: q.get("status")! } : {}),
-              },
-              orderBy: { updatedAt: "desc" },
-              take: 200,
-            });
-            const rows = [];
-            for (const t of threads) {
-              const reservation = await tx.reservation.findUniqueOrThrow({
-                where: { id: t.reservationId },
-              });
-              const latest = await tx.message.findFirst({
-                where: { threadId: t.id, workspaceId: ctx.workspaceId },
-                orderBy: { createdAt: "desc" },
-              });
-              rows.push({
-                ...t,
-                guestName:
-                  decrypt(reservation.guestNameEncrypted, ctx.workspaceId) ||
-                  "Guest",
-                preview: latest
-                  ? decrypt(latest.bodyEncrypted, ctx.workspaceId).slice(0, 140)
-                  : "",
-              });
-            }
-            await audit(
-              tx,
-              ctx,
-              "READ",
-              "Thread",
-              null,
-              "Host read conversation summaries and decrypted guest names.",
-            );
-            return rows;
-          }),
-        );
-      if (method === "GET" && path.length === 2)
-        return json(
-          await tenant(ctx, async (tx) => {
-            const t = await tx.thread.findFirst({
-              where: { id: path[1], workspaceId: ctx.workspaceId },
-            });
-            ensure(t, 404, "NOT_FOUND", "Conversation not found.");
-            const reservation = await tx.reservation.findUniqueOrThrow({
-                where: { id: t.reservationId },
-              }),
-              messages = await tx.message.findMany({
-                where: { workspaceId: ctx.workspaceId, threadId: t.id },
-                orderBy: { createdAt: "asc" },
-                take: 500,
-              });
-            const pastStays = reservation.guestHash
-              ? await tx.reservation.count({
-                  where: {
-                    workspaceId: ctx.workspaceId,
-                    guestHash: reservation.guestHash,
-                    endDate: { lt: new Date() },
-                    status: "CONFIRMED",
-                  },
-                })
-              : 0;
-            await audit(
-              tx,
-              ctx,
-              "READ",
-              "Thread",
-              t.id,
-              "Host read guest conversation, reservation context, and repeat-stay count.",
-            );
-            return {
-              thread: t,
-              reservation: reservationDTO(reservation, ctx),
-              pastStays,
-              messages: messages.map(({ bodyEncrypted, ...m }) => ({
-                ...m,
-                body: decrypt(bodyEncrypted, ctx.workspaceId),
-              })),
-            };
-          }),
-        );
-      if (method === "POST" && path[2] === "reply") {
-        const input = z
-          .object({
-            body: z.string().trim().min(1).max(12000),
-            idempotencyKey: z.uuid(),
-            draftId: V.id.optional(),
-          })
-          .parse(await body(request));
-        const result = await tenant(ctx, (tx) =>
-          reply(
-            tx,
-            ctx,
-            path[1],
-            input.body,
-            input.idempotencyKey,
-            input.draftId,
-          ),
-        );
-        kick(ctx.workspaceId);
-        return json(result, 202);
-      }
-      if (method === "POST" && path[2] === "toggle-manual") {
-        const input = z
-          .object({ manual: z.boolean() })
-          .parse(await body(request));
-        return json(
-          await tenant(ctx, async (tx) => {
-            const t = await tx.thread.update({
-              where: { id: path[1] },
-              data: { manual: input.manual },
-            });
-            if (input.manual) {
-              const drafts = await tx.message.findMany({
-                where: {
-                  workspaceId: ctx.workspaceId,
-                  threadId: t.id,
-                  automated: true,
-                  status: "QUEUED",
-                },
-                select: { id: true },
-              });
-              await tx.outbox.updateMany({
-                where: {
-                  workspaceId: ctx.workspaceId,
-                  entityId: { in: drafts.map((d) => d.id) },
-                  status: "PENDING",
-                },
-                data: { status: "CANCELLED" },
-              });
-              await tx.message.updateMany({
-                where: { id: { in: drafts.map((d) => d.id) } },
-                data: { status: "DRAFT" },
-              });
-            }
-            await audit(
-              tx,
-              ctx,
-              "TAKEOVER",
-              "Thread",
-              t.id,
-              input.manual
-                ? "Host disabled automation for this conversation."
-                : "Host restored automation for future incoming messages.",
-            );
-            return { manual: t.manual };
-          }),
-        );
-      }
-      if (method === "POST" && path[2] === "resolve")
-        return json(
-          await tenant(ctx, async (tx) => {
-            await tx.thread.update({
-              where: { id: path[1] },
-              data: { status: "RESOLVED" },
-            });
-            await audit(
-              tx,
-              ctx,
-              "RESOLVE",
-              "Thread",
-              path[1],
-              "Host marked this conversation resolved.",
-            );
-            return { ok: true };
-          }),
-        );
-    }
-    if (path[0] === "messages" && path[2] === "dismiss" && method === "POST")
-      return json(
-        await tenant(ctx, async (tx) => {
-          const m = await tx.message.findFirst({
-            where: {
-              id: path[1],
-              workspaceId: ctx.workspaceId,
-              status: "DRAFT",
-            },
-          });
-          ensure(m, 409, "DRAFT_CHANGED", "Draft is unavailable.");
-          await tx.message.update({
-            where: { id: m.id },
-            data: { status: "DISMISSED" },
-          });
-          await tx.thread.update({
-            where: { id: m.threadId },
-            data: { status: "NEEDS_REPLY" },
-          });
-          await audit(
-            tx,
-            ctx,
-            "DISMISS",
-            "Message",
-            m.id,
-            "Host dismissed a suggestion without sending it.",
-          );
-          return { ok: true };
-        }),
+    if (path[0] === "threads" && method === "POST" && path[2] === "reply") {
+      const input = z
+        .object({
+          body: z.string().trim().min(1).max(12000),
+          idempotencyKey: z.uuid(),
+          draftId: V.id.optional(),
+        })
+        .parse(await body(request));
+      const result = await tenant(ctx, (tx) =>
+        reply(
+          tx,
+          ctx,
+          path[1],
+          input.body,
+          input.idempotencyKey,
+          input.draftId,
+        ),
       );
+      kick(ctx.workspaceId);
+      return json(result, 202);
+    }
+    const inbox = await inboxRoutes(request, path, method, ctx);
+    if (inbox) return inbox;
     if (
       path[0] === "automation" &&
       method === "POST" &&

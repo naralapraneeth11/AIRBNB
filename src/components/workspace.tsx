@@ -3,9 +3,11 @@ import {
   createContext,
   useContext,
   useEffect,
+  useRef,
   useState,
   useCallback,
   type ReactNode,
+  type RefObject,
 } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -69,6 +71,67 @@ const navigation = [
   ["automation", "Automation", SlidersHorizontal],
   ["insights", "Insights", ChartNoAxesCombined],
 ] as const;
+/** Where the navigation becomes a drawer over the page (see globals.css). */
+const PHONE = "(max-width: 540px)";
+
+/**
+ * The navigation drawer on phones behaves as a modal: the page behind it is
+ * inert, focus moves into it and cannot Tab out, Escape closes it, and
+ * focus returns to the button that opened it. Widening the window past
+ * phone width closes it, since the sidebar is then always shown.
+ */
+function useDrawer(
+  open: boolean,
+  close: () => void,
+  drawer: RefObject<HTMLElement | null>,
+  opener: RefObject<HTMLElement | null>,
+) {
+  useEffect(() => {
+    const phone = window.matchMedia(PHONE);
+    const changed = () => {
+      if (!phone.matches) close();
+    };
+    phone.addEventListener("change", changed);
+    return () => phone.removeEventListener("change", changed);
+  }, [close]);
+  useEffect(() => {
+    const panel = drawer.current;
+    if (!open || !panel) return;
+    const focusable = () =>
+      [
+        ...panel.querySelectorAll<HTMLElement>(
+          "a[href], button:not([disabled])",
+        ),
+      ].filter((el) => el.getClientRects().length > 0);
+    focusable()[0]?.focus();
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      } else if (e.key === "Tab") {
+        const items = focusable(),
+          first = items[0],
+          last = items.at(-1);
+        const edge = e.shiftKey ? first : last;
+        if (
+          !panel.contains(document.activeElement) ||
+          document.activeElement === edge
+        ) {
+          e.preventDefault();
+          (e.shiftKey ? last : first)?.focus();
+        }
+      }
+    };
+    document.addEventListener("keydown", key);
+    const button = opener.current;
+    return () => {
+      document.removeEventListener("keydown", key);
+      const active = document.activeElement;
+      if (!active || active === document.body || panel.contains(active))
+        button?.focus();
+    };
+  }, [open, close, drawer, opener]);
+}
 export function Workspace({ section }: { section: string }) {
   const [data, setData] = useState<WorkspaceData | null>(null),
     [error, setError] = useState(""),
@@ -81,6 +144,10 @@ export function Workspace({ section }: { section: string }) {
     [notice, setNotice] = useState(""),
     [mobile, setMobile] = useState(false),
     [collapsed, setCollapsed] = useState(false);
+  const sidebar = useRef<HTMLElement>(null),
+    menuButton = useRef<HTMLButtonElement>(null);
+  const closeDrawer = useCallback(() => setMobile(false), []);
+  useDrawer(mobile, closeDrawer, sidebar, menuButton);
   const refresh = useCallback(async () => {
     const next = await api<WorkspaceData>("workspace");
     setData(next);
@@ -186,7 +253,15 @@ export function Workspace({ section }: { section: string }) {
         (mobile ? "mobile-open" : "")
       }
     >
-      <aside className="sidebar">
+      <aside
+        id="navigation"
+        className="sidebar"
+        ref={sidebar}
+        onClick={(e) => {
+          // Following any link closes the drawer.
+          if ((e.target as HTMLElement).closest("a")) setMobile(false);
+        }}
+      >
         <Link
           href="/calendar"
           className="brand"
@@ -215,7 +290,6 @@ export function Workspace({ section }: { section: string }) {
         <nav aria-label="Main navigation">
           {navigation.map(([id, name, Icon]) => (
             <Link
-              onClick={() => setMobile(false)}
               key={id}
               href={"/" + id}
               className={section === id ? "active" : ""}
@@ -287,11 +361,14 @@ export function Workspace({ section }: { section: string }) {
         aria-label="Close navigation"
         onClick={() => setMobile(false)}
       />
-      <main id="main" className="main">
+      <main id="main" className="main" inert={mobile}>
         <header className="topbar">
           <button
+            ref={menuButton}
             className="icon-button mobile-menu"
             aria-label="Open navigation"
+            aria-expanded={mobile}
+            aria-controls="navigation"
             onClick={() => setMobile(true)}
           >
             <Menu />
