@@ -38,7 +38,11 @@ import {
 } from "./crypto";
 import { audit, notify, event } from "./audit";
 import * as V from "./validation";
-import { listingDTO } from "./services/listings";
+import {
+  activeListing,
+  activeListingIds,
+  listingDTO,
+} from "./services/listings";
 import {
   assignTask,
   transitionTask,
@@ -58,6 +62,12 @@ import { body, bytes, formBody, json, range } from "./http";
 import { calendarRoutes } from "./routes/calendar";
 import { onboardingRoutes } from "./routes/onboarding";
 import { inboxRoutes } from "./routes/inbox";
+import {
+  removalPreview,
+  removeProperty,
+  removedProperties,
+  restoreProperty,
+} from "./services/properties";
 import { operationsHealth } from "./routes/operations";
 import { createConnection } from "./calendar/actions";
 import { propertySettingsChanged } from "./calendar/commit";
@@ -443,6 +453,7 @@ export async function handle(request: NextRequest) {
             ctx.workspaceId,
             "Host viewed properties, operational tasks, structured manuals, and automation rules.",
           );
+          const active = new Set(listings.map((l) => l.id));
           return {
             workspace: {
               id: workspace.id,
@@ -451,17 +462,24 @@ export async function handle(request: NextRequest) {
             },
             user: { name: user.name, role: ctx.role },
             listings: listings.map((l) => listingDTO(l, ctx)),
-            connections: connections.map((c) => connectionDTO(c)),
-            tasks: tasks.map(({ noteEncrypted, ...t }) => ({
-              ...t,
-              note: decrypt(noteEncrypted, ctx.workspaceId),
-            })),
+            // A removed property's links, work and rules are not shown.
+            connections: connections
+              .filter((c) => active.has(c.listingId))
+              .map((c) => connectionDTO(c)),
+            tasks: tasks
+              .filter((t) => active.has(t.listingId))
+              .map(({ noteEncrypted, ...t }) => ({
+                ...t,
+                note: decrypt(noteEncrypted, ctx.workspaceId),
+              })),
             cleaners,
             settings,
-            rules: rules.map(({ templateEncrypted, ...r }) => ({
-              ...r,
-              template: decrypt(templateEncrypted, ctx.workspaceId),
-            })),
+            rules: rules
+              .filter((r) => !r.listingId || active.has(r.listingId))
+              .map(({ templateEncrypted, ...r }) => ({
+                ...r,
+                template: decrypt(templateEncrypted, ctx.workspaceId),
+              })),
             notifications,
             integrations,
             providers: providerStatus(),
@@ -471,6 +489,40 @@ export async function handle(request: NextRequest) {
         }),
       );
     if (path[0] === "listings") {
+      // Removing a property from the app, and restoring it (see
+      // services/properties.ts). Anyone hosting may see what removal would
+      // change; only the owner may remove or restore.
+      if (method === "GET" && path[1] === "removed" && path.length === 2)
+        return json(await tenant(ctx, (tx) => removedProperties(tx, ctx)));
+      if (method === "GET" && path[2] === "removal" && path.length === 3)
+        return json(
+          await tenant(ctx, (tx) => removalPreview(tx, ctx, path[1])),
+        );
+      if (
+        method === "POST" &&
+        ["remove", "restore"].includes(path[2]) &&
+        path.length === 3
+      ) {
+        if (path[2] === "restore") {
+          const result = await tenant(ctx, (tx) =>
+            restoreProperty(tx, ctx, path[1]),
+          );
+          return json(result);
+        }
+        const input = z
+          .object({
+            confirmName: z.string().max(200),
+            version: z.number().int().nonnegative(),
+          })
+          .parse(await body(request));
+        const result = await tenant(ctx, (tx) =>
+          removeProperty(tx, ctx, path[1], input),
+        );
+        // Cleaners whose jobs were cancelled hear about it now, not at the
+        // next scheduled tick.
+        kick(ctx.workspaceId);
+        return json(result);
+      }
       if (method === "GET" && path.length === 1)
         return json(
           await tenant(ctx, async (tx) => {
@@ -530,10 +582,7 @@ export async function handle(request: NextRequest) {
         return json(
           await tenant(ctx, async (tx) => {
             await lock(tx, "listing:" + path[1]);
-            const before = await tx.listing.findFirst({
-              where: { id: path[1], workspaceId: ctx.workspaceId },
-            });
-            ensure(before, 404, "NOT_FOUND", "Listing not found.");
+            const before = await activeListing(tx, ctx, path[1]);
             ensure(
               before.version === input.version,
               409,
@@ -605,10 +654,7 @@ export async function handle(request: NextRequest) {
       if (method === "POST" && path[2] === "door-code")
         return json(
           await tenant(ctx, async (tx) => {
-            const l = await tx.listing.findFirst({
-              where: { id: path[1], workspaceId: ctx.workspaceId },
-            });
-            ensure(l, 404, "NOT_FOUND", "Listing not found.");
+            const l = await activeListing(tx, ctx, path[1]);
             await audit(
               tx,
               ctx,
@@ -636,9 +682,12 @@ export async function handle(request: NextRequest) {
     if (path[0] === "cleaning-tasks") {
       if (method === "GET")
         return json(
-          await tenant(ctx, (tx) =>
+          await tenant(ctx, async (tx) =>
             tx.cleaningTask.findMany({
-              where: { workspaceId: ctx.workspaceId },
+              where: {
+                workspaceId: ctx.workspaceId,
+                listingId: { in: await activeListingIds(tx, ctx) },
+              },
               orderBy: { scheduledAt: "asc" },
               take: 500,
             }),
@@ -661,14 +710,10 @@ export async function handle(request: NextRequest) {
         );
         return json(
           await tenant(ctx, async (tx) => {
-            ensure(
-              await tx.listing.findFirst({
-                where: { id: input.listingId, workspaceId: ctx.workspaceId },
-              }),
-              404,
-              "NOT_FOUND",
-              "Listing not found.",
-            );
+            // Locked like a removal, so no work is added to a property
+            // while it is being removed.
+            await lock(tx, "listing:" + input.listingId);
+            await activeListing(tx, ctx, input.listingId);
             const t = await tx.cleaningTask.create({
               data: {
                 workspaceId: ctx.workspaceId,
@@ -737,6 +782,8 @@ export async function handle(request: NextRequest) {
               "ACCEPT_REQUIRED",
               "The cleaner must accept first.",
             );
+            // No door code is released for a property removed from the app.
+            await activeListing(tx, ctx, task.listingId);
             const standing = await turnoverStanding(tx, ctx, task);
             ensure(
               standing.expected && !task.reviewRequired,
@@ -775,6 +822,7 @@ export async function handle(request: NextRequest) {
               where: {
                 workspaceId: ctx.workspaceId,
                 id: { in: input.listingIds },
+                archivedAt: null,
               },
             })) === new Set(input.listingIds).size,
             400,

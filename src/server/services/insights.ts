@@ -46,8 +46,10 @@ export async function insights(tx: Tx, ctx: Context, from: Date, to: Date) {
   });
   // Every scheduled or manual check records an observation (CAL 05); a check
   // succeeded when it produced a usable, accepted result.
+  // Removed properties are left out of every figure.
+  const active = listings.map((l) => l.id);
   const connections = await tx.channelConnection.findMany({
-    where: { workspaceId: ctx.workspaceId },
+    where: { workspaceId: ctx.workspaceId, listingId: { in: active } },
     select: { id: true, platform: true },
   });
   const observed = await tx.feedObservation.groupBy({
@@ -72,8 +74,16 @@ export async function insights(tx: Tx, ctx: Context, from: Date, to: Date) {
       };
     },
   );
+  const threads = await tx.thread.findMany({
+    where: { workspaceId: ctx.workspaceId, listingId: { in: active } },
+    select: { id: true },
+  });
   const messages = await tx.message.findMany({
-    where: { workspaceId: ctx.workspaceId, sentAt: { gte: from, lt: to } },
+    where: {
+      workspaceId: ctx.workspaceId,
+      threadId: { in: threads.map((t) => t.id) },
+      sentAt: { gte: from, lt: to },
+    },
     select: {
       id: true,
       replyToId: true,
@@ -101,6 +111,7 @@ export async function insights(tx: Tx, ctx: Context, from: Date, to: Date) {
   const tasks = await tx.cleaningTask.findMany({
     where: {
       workspaceId: ctx.workspaceId,
+      listingId: { in: active },
       status: "VERIFIED",
       verifiedAt: { gte: from, lt: to },
     },

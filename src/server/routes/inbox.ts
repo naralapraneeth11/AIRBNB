@@ -13,6 +13,7 @@ import { tenant, type Context, type Tx } from "../db";
 import { ensure } from "../errors";
 import { body, json } from "../http";
 import * as V from "../validation";
+import { activeListing, activeListingIds } from "../services/listings";
 
 /** Messages per page: the newest page first, then older pages on request. */
 export const MESSAGE_PAGE = 50;
@@ -27,10 +28,13 @@ type Filters = {
 };
 
 export async function threadSummaries(tx: Tx, ctx: Context, f: Filters) {
+  const active = await activeListingIds(tx, ctx);
   const threads = await tx.thread.findMany({
     where: {
       workspaceId: ctx.workspaceId,
-      ...(f.listing ? { listingId: f.listing } : {}),
+      listingId: f.listing
+        ? { in: active.filter((id) => id === f.listing) }
+        : { in: active },
       ...(f.platform ? { platform: f.platform } : {}),
       ...(f.status ? { status: f.status } : {}),
       ...(f.reservation ? { reservationId: f.reservation } : {}),
@@ -106,6 +110,16 @@ export async function messagePage(
   };
 }
 
+/** A conversation whose property has not been removed. */
+export async function threadOfActiveProperty(tx: Tx, ctx: Context, id: string) {
+  const thread = await tx.thread.findFirst({
+    where: { id, workspaceId: ctx.workspaceId },
+  });
+  ensure(thread, 404, "NOT_FOUND", "Conversation not found.");
+  await activeListing(tx, ctx, thread.listingId);
+  return thread;
+}
+
 export async function inboxRoutes(
   request: NextRequest,
   path: string[],
@@ -137,10 +151,7 @@ export async function inboxRoutes(
   if (area === "threads" && method === "GET" && id && !action)
     return json(
       await tenant(ctx, async (tx) => {
-        const t = await tx.thread.findFirst({
-          where: { id, workspaceId: ctx.workspaceId },
-        });
-        ensure(t, 404, "NOT_FOUND", "Conversation not found.");
+        const t = await threadOfActiveProperty(tx, ctx, id);
         const reservation = await tx.reservation.findUniqueOrThrow({
           where: { id: t.reservationId },
         });
@@ -174,6 +185,7 @@ export async function inboxRoutes(
     const before = V.id.parse(request.nextUrl.searchParams.get("before"));
     return json(
       await tenant(ctx, async (tx) => {
+        await threadOfActiveProperty(tx, ctx, id);
         const anchor = await tx.message.findFirst({
           where: { id: before, threadId: id, workspaceId: ctx.workspaceId },
           select: { createdAt: true, id: true },
@@ -200,6 +212,7 @@ export async function inboxRoutes(
     const input = z.object({ manual: z.boolean() }).parse(await body(request));
     return json(
       await tenant(ctx, async (tx) => {
+        await threadOfActiveProperty(tx, ctx, id);
         const t = await tx.thread.update({
           where: { id },
           data: { manual: input.manual },
@@ -244,6 +257,7 @@ export async function inboxRoutes(
   if (area === "threads" && method === "POST" && action === "resolve")
     return json(
       await tenant(ctx, async (tx) => {
+        await threadOfActiveProperty(tx, ctx, id);
         await tx.thread.update({
           where: { id },
           data: { status: "RESOLVED" },
@@ -270,6 +284,7 @@ export async function inboxRoutes(
           },
         });
         ensure(m, 409, "DRAFT_CHANGED", "Draft is unavailable.");
+        await threadOfActiveProperty(tx, ctx, m.threadId);
         await tx.message.update({
           where: { id: m.id },
           data: { status: "DISMISSED" },

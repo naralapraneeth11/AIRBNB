@@ -61,20 +61,37 @@ async function load(tx: Tx, ctx: Context) {
   const row = await tx.onboardingProgress.findUnique({
     where: { workspaceId: ctx.workspaceId },
   });
-  return {
-    exists: !!row,
-    progress: row
-      ? ({
-          step: row.step as Progress["step"],
-          completed: row.completed as SetupStep[],
-          skipped: row.skipped as SetupStep[],
-          listingId: row.listingId,
-          connectionId: row.connectionId,
-          exportConfirmedAt: row.exportConfirmedAt,
-          completedAt: row.completedAt,
-        } satisfies Progress)
-      : fresh(),
-  };
+  const progress: Progress = row
+    ? {
+        step: row.step as Progress["step"],
+        completed: row.completed as SetupStep[],
+        skipped: row.skipped as SetupStep[],
+        listingId: row.listingId,
+        connectionId: row.connectionId,
+        exportConfirmedAt: row.exportConfirmedAt,
+        completedAt: row.completedAt,
+      }
+    : fresh();
+  // The property chosen during setup was removed from the app: setup picks
+  // up again from choosing a property, as if none had been chosen.
+  if (progress.listingId && progress.step !== "DONE") {
+    const listing = await tx.listing.findFirst({
+      where: { workspaceId: ctx.workspaceId, id: progress.listingId },
+      select: { archivedAt: true },
+    });
+    if (listing?.archivedAt) {
+      const reopened: SetupStep[] = ["PROPERTY", "CALENDAR", "EXPORT"];
+      progress.listingId = null;
+      progress.connectionId = null;
+      progress.exportConfirmedAt = null;
+      progress.completed = progress.completed.filter(
+        (s) => !reopened.includes(s),
+      );
+      progress.skipped = progress.skipped.filter((s) => !reopened.includes(s));
+      progress.step = nextStep(progress);
+    }
+  }
+  return { exists: !!row, progress };
 }
 
 /** What the calendar check showed, in counts only (onboarding sequence). */
@@ -208,7 +225,11 @@ export async function onboardingRoutes(
       if (listingId && listingId !== p.listingId)
         ensure(
           await tx.listing.findFirst({
-            where: { workspaceId: ctx.workspaceId, id: listingId },
+            where: {
+              workspaceId: ctx.workspaceId,
+              id: listingId,
+              archivedAt: null,
+            },
           }),
           404,
           "NOT_FOUND",

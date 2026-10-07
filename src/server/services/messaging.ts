@@ -10,6 +10,7 @@ import {
 } from "@/lib/domain";
 import { aiReply } from "../integrations/providers";
 import { ensure } from "../errors";
+import { activeListing } from "./listings";
 export async function inbound(
   tx: Tx,
   ctx: Context,
@@ -139,6 +140,18 @@ export async function evaluateMessage(ctx: Context, messageId: string) {
     const listing = await tx.listing.findUniqueOrThrow({
       where: { id: thread.listingId },
     });
+    // A property removed from the app gets no prepared replies and no alerts.
+    if (listing.archivedAt) {
+      await audit(
+        tx,
+        ctx,
+        "SKIP",
+        "Message",
+        messageId,
+        "This property was removed from the app, so no reply was prepared.",
+      );
+      return null;
+    }
     const body = decrypt(message.bodyEncrypted, ctx.workspaceId),
       manual = unseal<HouseManual>(
         listing.houseManualEncrypted,
@@ -406,6 +419,7 @@ export async function reply(
     where: { workspaceId: ctx.workspaceId, id: threadId },
   });
   ensure(thread, 404, "NOT_FOUND", "Conversation not found.");
+  await activeListing(tx, ctx, thread.listingId);
   // A retry after a lost response must not send twice, and must not report
   // a failure for a reply that was accepted: the same request again returns
   // what the first one did. A key that comes back with different words is a

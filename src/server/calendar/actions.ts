@@ -64,6 +64,7 @@ import {
   toLocalDate,
 } from "./mappers";
 import { exportLink } from "./serve";
+import { activeListing } from "../services/listings";
 
 const TRANSITION_ERRORS = {
   STALE_REVISION: [
@@ -94,13 +95,10 @@ function unwrap(result: TransitionResult): BlockState {
   throw new AppError(status, code, message);
 }
 
+/** A property locked for a change, refused once removed from the app. */
 async function lockedListing(tx: Tx, ctx: Context, listingId: string) {
   await lock(tx, "listing:" + listingId);
-  const listing = await tx.listing.findFirst({
-    where: { id: listingId, workspaceId: ctx.workspaceId, archivedAt: null },
-  });
-  ensure(listing, 404, "NOT_FOUND", "Listing not found.");
-  return listing;
+  return activeListing(tx, ctx, listingId);
 }
 
 async function lockedBlock(tx: Tx, ctx: Context, blockId: string) {
@@ -377,6 +375,7 @@ export async function policySample(tx: Tx, ctx: Context, connectionId: string) {
     where: { workspaceId: ctx.workspaceId, id: connectionId },
   });
   ensure(c, 404, "NOT_FOUND", "Calendar connection not found.");
+  await activeListing(tx, ctx, c.listingId);
   const blocks = (await loadPropertyBlocks(tx, ctx, c.listingId)).filter(
     (b) => b.connectionId === c.id && isProtective(b),
   );
@@ -1096,7 +1095,7 @@ export async function recordConflictResolution(
     where: { workspaceId: ctx.workspaceId, id: caseId },
   });
   ensure(c, 404, "NOT_FOUND", "Conflict not found.");
-  await lock(tx, "listing:" + c.listingId);
+  await lockedListing(tx, ctx, c.listingId);
   const written = await tx.conflictCase.updateMany({
     where: { id: c.id, state: "OPEN", revision: input.expectedRevision },
     data: {
