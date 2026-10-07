@@ -35,6 +35,15 @@ minimumReleaseAgeExclude:
   - '@img/sharp-win32-x64@0.35.5'
   - sharp@0.35.5
 
+# Patched versions of packages that other dependencies still pin to a
+# vulnerable release. Remove an entry once its dependents require the fix.
+overrides:
+  # GHSA-wq5f-xc86-pv6w (librsvg in sharp <0.35.5): Next.js 16.3.6 accepts
+  # ^0.35.4, and this app processes uploaded photos with sharp.
+  sharp@<0.35.5: ^0.35.5
+  # GHSA-68fv-2mgg-jv7q (source-map-js <1.2.2), through postcss at build time.
+  source-map-js@<1.2.2: ^1.2.2
+
 # Dependency audit exceptions. Each entry needs a reason, an owner decision,
 # and a revisit trigger; CI fails on any other high or critical advisory.
 auditConfig:
@@ -44,3 +53,10 @@ auditConfig:
     # 6.x release). It merges this repository's own prisma config at build and
     # migrate time and never sees request data. Revisit on the Prisma 7 upgrade.
     - GHSA-ggr8-5vv4-36mx
+    # braces <=3.0.3 (stack exhaustion on deeply nested brace patterns), pulled
+    # in only by the linter (eslint-config-next > @next/eslint-plugin-next >
+    # fast-glob > micromatch). It expands this repository's own lint globs and
+    # never sees request data. No fixed release exists yet (latest is 3.0.3).
+    # Proposed 2026-10-07, pending the owner's confirmation. Revisit when a
+    # fixed braces is published or the plugin stops using fast-glob.
+    - GHSA-vfj7-8cjw-p6xm
