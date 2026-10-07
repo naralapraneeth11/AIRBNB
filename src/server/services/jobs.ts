@@ -31,6 +31,7 @@ import {
 } from "../calendar/commit";
 import { fromLocalDate, toLocalDate } from "../calendar/mappers";
 import type webpush from "web-push";
+import { activeListingIds } from "./listings";
 
 /** A tick must finish inside the platform's 60 second function limit. */
 export const TICK_BUDGET_MS = 48_000;
@@ -185,6 +186,30 @@ export async function dispatch(ctx: Context, id: string) {
             },
           });
         const body = decrypt(m.bodyEncrypted, ctx.workspaceId);
+        // Nothing is sent for a property removed from the app.
+        const property = await tx.listing.findUniqueOrThrow({
+          where: { id: thread.listingId },
+          select: { archivedAt: true },
+        });
+        if (property.archivedAt) {
+          await tx.message.update({
+            where: { id: m.id },
+            data: { status: "DRAFT" },
+          });
+          await tx.outbox.update({
+            where: { id },
+            data: { status: "CANCELLED", leaseUntil: null, leaseToken: null },
+          });
+          await audit(
+            tx,
+            ctx,
+            "SEND_STOPPED",
+            "Message",
+            m.id,
+            "This property was removed from the app; the reply was not sent.",
+          );
+          return null;
+        }
         const latest = await tx.message.findFirst({
           where: {
             workspaceId: ctx.workspaceId,
@@ -513,6 +538,8 @@ async function alertOverdue(workspaceId: string, now: Date) {
     const tasks = await tx.cleaningTask.findMany({
       where: {
         workspaceId,
+        // A removed property's work raises no alerts.
+        listingId: { in: await activeListingIds(tx, ctx) },
         OR: [
           { status: "ASSIGNED", acceptBy: { lt: now } },
           {

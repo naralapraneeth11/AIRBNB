@@ -142,11 +142,24 @@ export async function serveExport(input: {
       return notFound();
     }
     if (
-      !connection.enabled ||
       connection.listingId !== input.listingId ||
       (input.connectionId !== null && input.connectionId !== connection.id)
     )
       return notFound();
+    if (!connection.enabled) {
+      // A removed property's link answers "not found", never an empty
+      // calendar, so no platform is told its dates are free. The request is
+      // recorded so the host can see which platform still imports the link.
+      if (connection.health === "PROPERTY_REMOVED")
+        await recordRetrieval(tx, ctx, {
+          connectionId: connection.id,
+          tokenGeneration: connection.exportTokenGeneration,
+          version: 0,
+          responseClass: "UNAVAILABLE",
+          at,
+        });
+      return notFound();
+    }
     if ((await calendarMode(tx, ctx)) === "SHADOW") {
       // REL 01: shadow decisions are not published to any platform.
       await recordRetrieval(tx, ctx, {

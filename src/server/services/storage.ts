@@ -4,6 +4,7 @@ import { required } from "../config";
 import { ensure } from "../errors";
 import { tenant, type Context } from "../db";
 import { audit } from "../audit";
+import { activeListing } from "./listings";
 function url(key: string) {
   return `${required("SUPABASE_URL").replace(/\/$/, "")}/storage/v1/object/${encodeURIComponent(process.env.STORAGE_BUCKET || "airbnb-private")}/${key.split("/").map(encodeURIComponent).join("/")}`;
 }
@@ -53,16 +54,10 @@ export async function uploadPhoto(
         "PHOTO_STATE",
         "Start the task before uploading verification photos.",
       );
-    } else
-      ensure(
-        listingId &&
-          (await tx.listing.findFirst({
-            where: { id: listingId, workspaceId: ctx.workspaceId },
-          })),
-        404,
-        "NOT_FOUND",
-        "Listing not found.",
-      );
+    } else {
+      ensure(listingId, 404, "NOT_FOUND", "Listing not found.");
+      await activeListing(tx, ctx, listingId);
+    }
   });
   const bytes = await sharp(Buffer.from(await file.arrayBuffer()), {
     limitInputPixels: 24_000_000,

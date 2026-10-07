@@ -224,6 +224,31 @@ export type Message = {
   sentAt: string | null;
   createdAt: string;
 };
+/** What removing a property would change (GET listings/:id/removal). */
+export type RemovalPreview = {
+  id: string;
+  name: string;
+  version: number;
+  calendarsChecked: number;
+  exportLinks: number;
+  /** Export links a platform (or anyone) read in the last two weeks. */
+  linksInUse: { name: string; lastAt: string }[];
+  upcomingStays: number;
+  cleaningsToCancel: number;
+  cleanersToTell: number;
+  cleanersToldAutomatically: boolean;
+  cleaningUnderWay: boolean;
+  openConversations: number;
+};
+/** A property removed from the app (GET listings/removed). */
+export type RemovedProperty = {
+  id: string;
+  name: string;
+  address: string;
+  removedAt: string;
+  /** Requests for its paused links since it was removed. */
+  linksStillRequested: { name: string; lastAt: string }[];
+};
 /** Messages oldest first; `hasOlder` says whether earlier ones remain. */
 export type MessagePage = { messages: Message[]; hasOlder: boolean };
 /** A conversation opens on its newest page of messages. */

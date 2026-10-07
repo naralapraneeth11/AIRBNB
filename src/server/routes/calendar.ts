@@ -37,6 +37,7 @@ import { lock, tenant, type Context, type Tx } from "../db";
 import { AppError, ensure } from "../errors";
 import { body, json, range } from "../http";
 import * as V from "../validation";
+import { activeListing, activeListingIds } from "../services/listings";
 
 const REVIEW_FLAGS = [
   "IDENTITY_UNCERTAIN",
@@ -57,6 +58,7 @@ async function blocksInRange(tx: Tx, ctx: Context, from: Date, to: Date) {
   const rows = await tx.availabilityBlock.findMany({
     where: {
       workspaceId: ctx.workspaceId,
+      listingId: { in: await activeListingIds(tx, ctx) },
       startDate: { lt: to },
       endDate: { gt: from },
       // Released dates stay visible for their 24-hour restore window.
@@ -115,9 +117,11 @@ const isUnknown = (r: AvailabilityBlock) =>
  */
 export async function attention(tx: Tx, ctx: Context) {
   const recent = new Date(Date.now() - 2 * 86_400_000);
+  const active = await activeListingIds(tx, ctx);
   const rows = await tx.availabilityBlock.findMany({
     where: {
       workspaceId: ctx.workspaceId,
+      listingId: { in: active },
       lifecycle: { not: "RELEASED" },
       OR: [
         { lifecycle: "AWAITING_DECISION" },
@@ -135,7 +139,11 @@ export async function attention(tx: Tx, ctx: Context) {
     take: 300,
   });
   const conflicts = await tx.conflictCase.findMany({
-    where: { workspaceId: ctx.workspaceId, state: "OPEN" },
+    where: {
+      workspaceId: ctx.workspaceId,
+      state: "OPEN",
+      listingId: { in: active },
+    },
     orderBy: [{ overlapStart: "asc" }, { id: "asc" }],
     take: 100,
   });
@@ -159,14 +167,22 @@ export async function attention(tx: Tx, ctx: Context) {
   };
 }
 
+/** A calendar link whose property has not been removed. */
+async function connectionOfActiveProperty(tx: Tx, ctx: Context, id: string) {
+  const c = await tx.channelConnection.findFirst({
+    where: { workspaceId: ctx.workspaceId, id },
+  });
+  ensure(c, 404, "NOT_FOUND", "Calendar connection not found.");
+  await activeListing(tx, ctx, c.listingId);
+  return c;
+}
+
 async function oneBlock(tx: Tx, ctx: Context, id: string) {
   const row = await tx.availabilityBlock.findFirst({
     where: { workspaceId: ctx.workspaceId, id },
   });
   ensure(row, 404, "NOT_FOUND", "These dates were not found.");
-  const listing = await tx.listing.findUniqueOrThrow({
-    where: { id: row.listingId },
-  });
+  const listing = await activeListing(tx, ctx, row.listingId);
   const connection = row.connectionId
     ? await tx.channelConnection.findUnique({ where: { id: row.connectionId } })
     : null;
@@ -198,6 +214,7 @@ export async function calendarRoutes(
         const conflicts = await tx.conflictCase.findMany({
           where: {
             workspaceId: ctx.workspaceId,
+            listingId: { in: await activeListingIds(tx, ctx) },
             state: "OPEN",
             overlapStart: { lt: r.to },
             overlapEnd: { gt: r.from },
@@ -397,6 +414,7 @@ export async function calendarRoutes(
           const rows = await tx.reservation.findMany({
             where: {
               workspaceId: ctx.workspaceId,
+              listingId: { in: await activeListingIds(tx, ctx) },
               startDate: { lt: r.to },
               endDate: { gt: r.from },
             },
@@ -493,6 +511,7 @@ export async function calendarRoutes(
             where: { workspaceId: ctx.workspaceId, id },
           });
           ensure(c, 404, "NOT_FOUND", "Calendar connection not found.");
+          await activeListing(tx, ctx, c.listingId);
           const observations = await tx.feedObservation.findMany({
             where: { workspaceId: ctx.workspaceId, connectionId: id },
             orderBy: { observedAt: "desc" },
@@ -530,6 +549,7 @@ export async function calendarRoutes(
         .parse(await body(request));
       return json(
         await tenant(ctx, async (tx) => {
+          await connectionOfActiveProperty(tx, ctx, id);
           if (input.url !== undefined)
             await replaceConnectionUrl(tx, ctx, id, input.url);
           if (input.enabled !== undefined)
@@ -556,6 +576,7 @@ export async function calendarRoutes(
       ownerOnly(ctx);
       return json(
         await tenant(ctx, async (tx) => {
+          await connectionOfActiveProperty(tx, ctx, id);
           const rotated = await rotateExportToken(tx, ctx, id);
           ensure(rotated, 404, "NOT_FOUND", "Calendar connection not found.");
           return rotated;
@@ -598,7 +619,11 @@ export async function calendarRoutes(
         await tenant(ctx, async (tx) =>
           (
             await tx.conflictCase.findMany({
-              where: { workspaceId: ctx.workspaceId, state: "OPEN" },
+              where: {
+                workspaceId: ctx.workspaceId,
+                state: "OPEN",
+                listingId: { in: await activeListingIds(tx, ctx) },
+              },
               orderBy: [{ severity: "asc" }, { overlapStart: "asc" }],
               take: 500,
             })
@@ -627,6 +652,7 @@ export async function calendarRoutes(
     ownerOnly(ctx);
     return json(
       await tenant(ctx, async (tx) => {
+        await activeListing(tx, ctx, id);
         const master = await tx.channelConnection.findFirst({
           where: {
             workspaceId: ctx.workspaceId,

@@ -1,9 +1,26 @@
 "use client";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useWorkspace, MutationForm } from "./workspace";
-import { Head, Button, Badge, Empty, Field, Toggle, ErrorBox } from "./ui";
-import { api, label, money, dateTime, localDate } from "@/lib/client";
-import { dayAdd, manualFields } from "@/lib/domain";
+import {
+  Head,
+  Button,
+  Badge,
+  Empty,
+  Field,
+  Toggle,
+  ErrorBox,
+  Confirm,
+} from "./ui";
+import {
+  api,
+  APIError,
+  ago,
+  label,
+  money,
+  dateTime,
+  localDate,
+} from "@/lib/client";
+import { dayAdd, manualFields, sameName } from "@/lib/domain";
 import type {
   Listing,
   Rule,
@@ -11,6 +28,8 @@ import type {
   Insights,
   AuditEntry,
   Job,
+  RemovalPreview,
+  RemovedProperty,
 } from "@/lib/types";
 import {
   Plus,
@@ -32,6 +51,8 @@ import {
   PenLine,
   RefreshCw,
   LockKeyhole,
+  Trash2,
+  RotateCcw,
 } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { ConnectionDot, PolicyQuestion } from "./calendar";
@@ -127,6 +148,7 @@ export function PropertiesView() {
           />
         </section>
       )}
+      <RemovedProperties />
       <section className="panel property-principles">
         <div>
           <ShieldCheck />
@@ -402,6 +424,27 @@ function ListingDetail({ listing: initial }: { listing: Listing }) {
               History & explanation
             </Button>
           </div>
+          {data.user.role === "HOST" && (
+            <section className="danger-zone">
+              <div>
+                <h3>Remove from this app</h3>
+                <p>
+                  Stops its calendar checks, export links and cleaning here.
+                  Nothing changes on Airbnb, Vrbo or any other platform, and you
+                  can restore it later.
+                </p>
+              </div>
+              <Button
+                className="danger"
+                onClick={() =>
+                  show(`Remove ${l.name}?`, <RemoveProperty listing={l} />)
+                }
+              >
+                <Trash2 size={15} />
+                Remove property…
+              </Button>
+            </section>
+          )}
           <input
             ref={photo}
             type="file"
@@ -484,6 +527,279 @@ function ListingDetail({ listing: initial }: { listing: Listing }) {
     </div>
   );
 }
+/** "its calendar", "its 3 calendars". */
+const its = (n: number, one: string, many = one + "s") =>
+  n === 1 ? `its ${one}` : `its ${n} ${many}`;
+const capital = (text: string) => text[0].toUpperCase() + text.slice(1);
+
+/**
+ * Removing a property from the app. It says what stops and what does not
+ * before anything happens, and asks for the property's name.
+ */
+function RemoveProperty({ listing }: { listing: Listing }) {
+  const { mutate, show, close, toast } = useWorkspace();
+  const now = useNow();
+  const [preview, setPreview] = useState<RemovalPreview | null>(null),
+    [error, setError] = useState(""),
+    [typed, setTyped] = useState(""),
+    [busy, setBusy] = useState(false),
+    [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let active = true;
+    api<RemovalPreview>(`listings/${listing.id}/removal`)
+      .then((p) => {
+        if (active) setPreview(p);
+      })
+      .catch((e) => {
+        if (active) setError((e as Error).message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [listing.id, attempt]);
+  const back = () =>
+    show(listing.name, <ListingDetail listing={listing} />, true);
+  if (!preview)
+    return error ? (
+      <ErrorBox
+        message={error}
+        retry={() => {
+          setError("");
+          setAttempt((n) => n + 1);
+        }}
+      />
+    ) : (
+      <p className="microcopy" role="status">
+        Checking what this property is connected to…
+      </p>
+    );
+  const p = preview;
+  const confirmed = sameName(typed, p.name);
+  async function remove() {
+    setBusy(true);
+    setError("");
+    try {
+      await mutate(`listings/${p.id}/remove`, {
+        confirmName: typed,
+        version: p.version,
+      });
+      toast(`${p.name} was removed. Restore it any time from Properties.`);
+      close();
+    } catch (e) {
+      setError((e as Error).message);
+      // Someone changed it meanwhile: show what removal would change now.
+      if (e instanceof APIError && e.code === "VERSION_CONFLICT") {
+        setPreview(null);
+        setAttempt((n) => n + 1);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <form
+      className="removal"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (confirmed && !p.cleaningUnderWay) remove();
+      }}
+    >
+      <p className="removal-lead">
+        This takes <strong>{p.name}</strong> out of this app. Nothing is changed
+        or deleted on Airbnb, Vrbo or any other platform.
+      </p>
+      <h3>What happens</h3>
+      <ul className="removal-list">
+        {p.calendarsChecked > 0 && (
+          <li>We stop checking {its(p.calendarsChecked, "calendar")}.</li>
+        )}
+        {p.exportLinks > 0 && (
+          <li>
+            {capital(its(p.exportLinks, "calendar link"))}{" "}
+            {p.exportLinks === 1
+              ? "stops answering. It never sends"
+              : "stop answering. They never send"}{" "}
+            an empty calendar, so no dates open up on any platform.
+          </li>
+        )}
+        {p.upcomingStays > 0 && (
+          <li>
+            {capital(its(p.upcomingStays, "upcoming stay"))}{" "}
+            {p.upcomingStays === 1
+              ? "remains booked on its platform; this app just stops showing it."
+              : "remain booked on their platforms; this app just stops showing them."}
+          </li>
+        )}
+        {p.cleaningsToCancel > 0 && (
+          <li>
+            {capital(its(p.cleaningsToCancel, "upcoming cleaning"))}{" "}
+            {p.cleaningsToCancel === 1 ? "is" : "are"} cancelled.
+            {p.cleanersToTell > 0 &&
+              (p.cleanersToldAutomatically
+                ? ` ${p.cleanersToTell === 1 ? "The cleaner is" : `The ${p.cleanersToTell} cleaners are`} told not to come.`
+                : ` Cleaning automation is off, so tell ${p.cleanersToTell === 1 ? "the cleaner" : `the ${p.cleanersToTell} cleaners`} yourself.`)}
+          </li>
+        )}
+        {p.openConversations > 0 && (
+          <li>
+            {capital(its(p.openConversations, "open conversation"))}{" "}
+            {p.openConversations === 1 ? "leaves" : "leave"} the Inbox. Guests
+            can still reach you on each platform.
+          </li>
+        )}
+        <li>
+          Its history is kept, and you can restore it from Properties at any
+          time.
+        </li>
+      </ul>
+      {p.linksInUse.length > 0 && (
+        <p className="callout removal-links" role="note">
+          <Info size={16} aria-hidden="true" />
+          <span>
+            <strong>Platforms read these links recently:</strong>{" "}
+            {p.linksInUse
+              .map((l) => `${l.name} (${ago(l.lastAt, now)})`)
+              .join(", ")}
+            . When you are ready, remove them in each platform&rsquo;s calendar
+            settings. Until then, that platform shows a sync error.
+          </span>
+        </p>
+      )}
+      {p.cleaningUnderWay ? (
+        <p className="callout removal-blocked" role="alert">
+          <Info size={16} aria-hidden="true" />
+          <span>
+            A cleaner is working there now. You can remove it once they have
+            finished.
+          </span>
+        </p>
+      ) : (
+        <Field
+          label={`Type “${p.name}” to confirm`}
+          hint="Capital letters do not matter."
+        >
+          <input
+            name="confirmName"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            autoCapitalize="off"
+          />
+        </Field>
+      )}
+      {error && <ErrorBox message={error} />}
+      <div className="form-actions">
+        <Button type="button" onClick={back}>
+          Cancel
+        </Button>
+        <Button
+          type="submit"
+          className="danger solid"
+          disabled={!confirmed || busy || p.cleaningUnderWay}
+        >
+          <Trash2 size={15} />
+          {busy ? "Removing…" : "Remove property"}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+/** Removed properties, kept so they can be restored (owner only). */
+function RemovedProperties() {
+  const { data, mutate, toast } = useWorkspace();
+  const now = useNow();
+  const [rows, setRows] = useState<RemovedProperty[]>([]),
+    [error, setError] = useState(""),
+    [restoring, setRestoring] = useState<RemovedProperty | null>(null),
+    [busy, setBusy] = useState(false);
+  const owner = data.user.role === "HOST";
+  const load = useCallback(
+    () =>
+      api<RemovedProperty[]>("listings/removed")
+        .then((r) => {
+          setRows(r);
+          setError("");
+        })
+        .catch((e) => setError((e as Error).message)),
+    [],
+  );
+  // Reloaded whenever a property leaves or comes back.
+  const properties = data.listings.length;
+  useEffect(() => {
+    load();
+  }, [load, properties]);
+  async function restore(r: RemovedProperty) {
+    setBusy(true);
+    try {
+      await mutate(`listings/${r.id}/restore`, {});
+      toast(`${r.name} is back. Its calendars are being checked again.`);
+      setRestoring(null);
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+      setRestoring(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (!rows.length) return error ? <ErrorBox message={error} /> : null;
+  return (
+    <details className="panel removed-properties">
+      <summary>
+        Removed properties <Badge>{rows.length}</Badge>
+      </summary>
+      <p className="microcopy">
+        Out of the app: no calendar checks, export links or cleaning. Their
+        history is kept, so they can be restored.
+      </p>
+      {error && <ErrorBox message={error} />}
+      <ul>
+        {rows.map((r) => (
+          <li key={r.id}>
+            <div>
+              <strong>{r.name}</strong>
+              <small>
+                {r.address} · Removed {dateTime(r.removedAt)}
+              </small>
+              {r.linksStillRequested.length > 0 && (
+                <p className="removed-warning">
+                  <Info size={14} aria-hidden="true" />
+                  <span>
+                    Still asked for its calendar link:{" "}
+                    {r.linksStillRequested
+                      .map((l) => `${l.name} (${ago(l.lastAt, now)})`)
+                      .join(", ")}
+                    . Remove the link in that platform&rsquo;s calendar
+                    settings.
+                  </span>
+                </p>
+              )}
+            </div>
+            {owner && (
+              <Button onClick={() => setRestoring(r)}>
+                <RotateCcw size={15} />
+                Restore
+              </Button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {restoring && (
+        <Confirm
+          title={`Restore ${restoring.name}?`}
+          detail="It comes back to every screen. Its calendar links are checked and answer platforms again straight away, and upcoming stays get cleaning jobs again, ready to assign."
+          label="Restore"
+          busy={busy}
+          onConfirm={() => restore(restoring)}
+          onClose={() => setRestoring(null)}
+        />
+      )}
+    </details>
+  );
+}
+
 function ChannelsTab({ listing: l }: { listing: Listing }) {
   const { data, show } = useWorkspace();
   const now = useNow();

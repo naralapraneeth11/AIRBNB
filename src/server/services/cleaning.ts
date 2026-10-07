@@ -13,9 +13,83 @@ import {
 } from "@/domain/cleaning/turnover";
 import { todayIn } from "@/domain/calendar/dates";
 import type { BlockState, Lifecycle } from "@/domain/calendar/types";
+import { activeListing } from "./listings";
 
 const CLOSED = ["CANCELLED", "SUPERSEDED"];
 const toDate = (d: Date) => d.toISOString().slice(0, 10);
+
+/**
+ * Close work that has not begun (CLEAN 01/03), unless it changed meanwhile.
+ * The cleaner keeps their link so they see a clear cancelled or changed
+ * screen; queued invitations stop and door codes stay withheld. A cleaner
+ * who held the job is sent a notice, which goes out only while cleaning
+ * automation is on. Returns whether the task was closed.
+ */
+export async function closeTask(
+  tx: Tx,
+  ctx: Context,
+  task: CleaningTask,
+  status: "CANCELLED" | "SUPERSEDED",
+  reason: string,
+  now: Date,
+) {
+  const written = await tx.cleaningTask.updateMany({
+    where: { id: task.id, version: task.version },
+    data: {
+      status,
+      closedAt: now,
+      closeReason: reason,
+      reviewRequired: false,
+      reviewReason: null,
+      codeReleasedAt: null,
+      version: { increment: 1 },
+    },
+  });
+  if (!written.count) return false;
+  await tx.outbox.updateMany({
+    where: {
+      workspaceId: ctx.workspaceId,
+      entityId: task.id,
+      kind: "CLEANER_SMS",
+      status: "PENDING",
+    },
+    data: { status: "CANCELLED" },
+  });
+  if (task.cleanerId && ["ASSIGNED", "ACCEPTED"].includes(task.status))
+    await enqueue(
+      tx,
+      ctx,
+      "CLEANER_NOTICE",
+      task.id,
+      `notice:${task.id}:${status}`,
+      {
+        cleanerId: task.cleanerId,
+        text:
+          status === "SUPERSEDED"
+            ? "A cleaning job assigned to you changed. Your host will send the updated job; please do not start the old one."
+            : "A cleaning job assigned to you was cancelled. Please do not go to the property for it.",
+      },
+      "CLEANING",
+    );
+  await event(
+    tx,
+    ctx,
+    `CLEANING_${status}`,
+    task.id,
+    `transition:${task.id}:${status}`,
+    { from: task.status, to: status, reason },
+  );
+  await audit(
+    tx,
+    ctx,
+    "TRANSITION",
+    "CleaningTask",
+    task.id,
+    `${task.status} → ${status}: ${reason}.`,
+    { reservationId: task.reservationId },
+  );
+  return true;
+}
 
 /**
  * CLEAN 01/03: bring a reservation's turnover work in line with the stay.
@@ -95,63 +169,7 @@ export async function applyTurnover(
     const task = byId.get(op.taskId)!;
     if (op.type === "SUPERSEDE" || op.type === "CANCEL") {
       const status = op.type === "SUPERSEDE" ? "SUPERSEDED" : "CANCELLED";
-      const written = await tx.cleaningTask.updateMany({
-        where: { id: task.id, version: task.version },
-        data: {
-          status,
-          closedAt: now,
-          closeReason: op.reason,
-          reviewRequired: false,
-          reviewReason: null,
-          codeReleasedAt: null,
-          version: { increment: 1 },
-        },
-      });
-      if (!written.count) continue;
-      // The cleaner keeps their link so they see a clear cancelled or changed
-      // screen; queued invitations stop and door codes stay withheld.
-      await tx.outbox.updateMany({
-        where: {
-          workspaceId: ctx.workspaceId,
-          entityId: task.id,
-          kind: "CLEANER_SMS",
-          status: "PENDING",
-        },
-        data: { status: "CANCELLED" },
-      });
-      if (task.cleanerId && ["ASSIGNED", "ACCEPTED"].includes(task.status))
-        await enqueue(
-          tx,
-          ctx,
-          "CLEANER_NOTICE",
-          task.id,
-          `notice:${task.id}:${status}`,
-          {
-            cleanerId: task.cleanerId,
-            text:
-              status === "SUPERSEDED"
-                ? "A cleaning job assigned to you changed. Your host will send the updated job; please do not start the old one."
-                : "A cleaning job assigned to you was cancelled. Please do not go to the property for it.",
-          },
-          "CLEANING",
-        );
-      await event(
-        tx,
-        ctx,
-        `CLEANING_${status}`,
-        task.id,
-        `transition:${task.id}:${status}`,
-        { from: task.status, to: status, reason: op.reason },
-      );
-      await audit(
-        tx,
-        ctx,
-        "TRANSITION",
-        "CleaningTask",
-        task.id,
-        `${task.status} → ${status}: ${op.reason}.`,
-        { reservationId: reservation.id },
-      );
+      if (!(await closeTask(tx, ctx, task, status, op.reason, now))) continue;
       await notify(
         tx,
         ctx,
@@ -270,6 +288,7 @@ export async function assignTask(
     where: { id: taskId, workspaceId: ctx.workspaceId },
   });
   ensure(task, 404, "NOT_FOUND", "Task not found.");
+  await activeListing(tx, ctx, task.listingId);
   const standing = await turnoverStanding(tx, ctx, task);
   ensure(
     !standing.closed,
