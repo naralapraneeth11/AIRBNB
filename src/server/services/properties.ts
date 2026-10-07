@@ -26,6 +26,7 @@ import { closeTask } from "./cleaning";
 import { capabilityOf } from "@/domain/calendar/capabilities";
 import { todayIn } from "@/domain/calendar/dates";
 import type { Platform } from "@/domain/calendar/types";
+import { sameName } from "@/lib/domain";
 
 /** The connection health that marks a link paused by its property's removal. */
 export const PAUSED_BY_REMOVAL = "PROPERTY_REMOVED";
@@ -42,11 +43,7 @@ const RECENT_USE_MS = 14 * 86_400_000;
 export const ACTIVE_CLEANING_MS = 12 * 3_600_000;
 
 /** Typed confirmation: the property's name, ignoring case and spacing. */
-export function namesMatch(typed: string, name: string) {
-  const norm = (s: string) =>
-    s.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase();
-  return norm(typed) !== "" && norm(typed) === norm(name);
-}
+export const namesMatch = sameName;
 
 const linkName = (c: { label: string | null; platform: string }) =>
   c.label || capabilityOf(c.platform as Platform).displayName;

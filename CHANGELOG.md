@@ -4,7 +4,52 @@ Notable changes, newest first. Requirement identifiers refer to the Hostsphere
 Product and Engineering Specification v1.1. Gate evidence lives in
 [docs/RELEASE_GATES.md](docs/RELEASE_GATES.md).
 
-## Unreleased: Inbox reliability, calendar dates and phone navigation
+## Unreleased: removing a property, and security updates
+
+### Before you upgrade
+
+- **Migration.** Apply `202610070001_property_removal` (`pnpm db:migrate`)
+  and re-run `prisma/grants/runtime-role.sql` as after every migration. It
+  only widens one check constraint, so it is safe before or after deploying
+  the code; until it runs, removing a property fails and changes nothing.
+
+### Added
+
+- **Remove a property from the app** (owner only, in the property's
+  Overview). The dialog lists what will stop, and the button stays disabled
+  until the property's name is typed. Nothing is changed or deleted on
+  Airbnb, Vrbo or any other platform:
+  - its calendars are no longer fetched, and a check already downloading
+    cannot apply what it fetched;
+  - its export links answer "not found", never an empty calendar, so no
+    dates open up anywhere; the dialog names links a platform read recently
+    so they can be removed there;
+  - cleaning work that has not begun is cancelled as for a cancelled stay,
+    and the cleaner who held a job is told (when cleaning automation is
+    on); removal waits while a cleaning started in the last 12 hours is
+    under way;
+  - unsent replies are held as drafts, and new guest messages get no
+    prepared reply or alert;
+  - it leaves the calendar, Inbox, cleaning, reports, alerts and setup, and
+    every action on it is refused with a clear message.
+- **Restore** from Properties → Removed properties. History is never
+  deleted (as everywhere in this app), so restoring brings the property
+  back with its calendar links (only those the removal paused), checks
+  them straight away, and recreates cleaning work for upcoming stays. The
+  removed list shows a platform still requesting a paused link.
+
+### Security
+
+- Next.js 16.3.6, fixing a critical advisory published after the last
+  release (GHSA-vcvr-r3jv-pc5j, remote code execution through `next/og`
+  `ImageResponse`, which this app does not use).
+- Patched sharp (0.35.5) and source-map-js (1.2.2) everywhere, through
+  overrides where Next.js and build tools still allowed older releases.
+- The braces advisory (GHSA-vfj7-8cjw-p6xm) has no fixed release yet. It
+  reaches only the linter, on this repository's own files, so it is
+  recorded as an audit exception pending the owner's confirmation.
+
+## Inbox reliability, calendar dates and phone navigation ([#3](https://github.com/naralapraneeth11/AIRBNB/pull/3))
 
 ### Before you upgrade
 

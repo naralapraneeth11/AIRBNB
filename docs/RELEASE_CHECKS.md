@@ -4,6 +4,35 @@ A check counts as passed only when it ran (QA 03). This file records runs, not
 intentions; gate status and remaining operator work are in
 [RELEASE_GATES.md](RELEASE_GATES.md).
 
+## Removing a property, and security updates: October 7, 2026
+
+Run locally against the working tree of the commit that adds this entry, on
+Next.js 16.3.6. Same environment as below otherwise.
+
+| Gate (CI order)                  | Result                                                                                                                                                                                                                               |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm install --frozen-lockfile` | Passed                                                                                                                                                                                                                               |
+| `pnpm typecheck`                 | Passed                                                                                                                                                                                                                               |
+| `pnpm lint`                      | Passed: 0 errors, the same 16 warnings                                                                                                                                                                                               |
+| `pnpm format:check`              | Passed                                                                                                                                                                                                                               |
+| `pnpm test`                      | 100 passed, 0 failed, 0 skipped                                                                                                                                                                                                      |
+| `pnpm test:integration`          | 38 passed, 0 failed, 0 skipped (adds removal: what it stops, the owner, name and version guards, a cleaning under way, a check fetching during removal, held and blocked messages, restore fidelity, setup, and workspace isolation) |
+| `pnpm build`                     | Passed                                                                                                                                                                                                                               |
+| `pnpm test:browser`              | 31 passed, 0 failed, 0 skipped (adds the remove dialog and typed name, removal from every screen, the export link answering 404, the removed list and restore, and phone width)                                                      |
+| `pnpm audit:deps`                | Passed: two recorded exceptions, GHSA-ggr8-5vv4-36mx and the new GHSA-vfj7-8cjw-p6xm (linter only, no fixed release)                                                                                                                 |
+
+Before the update, the audit failed on four new advisories published after
+the previous run (one critical in Next.js 16.3.5); none came from this
+change. Two removal checks were confirmed to fail with their protection
+taken out: without moving the fence, a check fetching during removal
+applied its download; without the messaging guards, a removed property's
+guest message raised an alert. The screens were reviewed by eye at desktop
+and phone widths, which led to one wording fix.
+
+Not verified here: a real platform's behaviour when an imported link starts
+answering 404 (the app never serves an empty calendar; what each platform
+then shows is up to the platform), and the hosted deployment.
+
 ## Inbox reliability, calendar dates and phone navigation: September 30, 2026
 
 Run locally against the working tree of the commit that adds this entry.

@@ -61,6 +61,15 @@ export function intentOf(text: string) {
     return "BOOKING_ADJACENT";
   return "QUESTION";
 }
+/**
+ * Whether typed text names something: same words, ignoring case and extra
+ * spaces. Used to confirm removing a property, on screen and on the server.
+ */
+export function sameName(typed: string, name: string) {
+  const norm = (s: string) =>
+    s.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+  return norm(typed) !== "" && norm(typed) === norm(name);
+}
 export function dateOnly(v: string | Date) {
   const s = typeof v === "string" ? v : v.toISOString();
   return s.slice(0, 10);

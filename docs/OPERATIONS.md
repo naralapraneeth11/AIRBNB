@@ -42,6 +42,7 @@ Each export link is specific to one destination: it leaves out that destination'
 | Provider-accepted message/SMS | Cannot be recalled; investigate and send a human correction if needed                                                                           |
 | External reservation          | Resolve with the platform and guest, then record the confirmed outcome in this application                                                      |
 | Door code already revealed    | Access can be revoked in the application, but knowledge cannot be recalled; rotate the physical lock's code separately                          |
+| Removed property              | Restore it from Properties → Removed properties; its paused calendar links resume and upcoming stays get new, unassigned cleaning jobs          |
 
 The app controls code disclosure, not physical smart-lock provisioning. It never cancels an OTA booking. Global pause is checked again before dispatch but cannot retract a network request already handed to a provider. Calendar checks and operational alerts continue while guest and cleaning automation is paused.
 
@@ -108,6 +109,12 @@ Keep the task unverified. Check the private bucket, server credentials, quotas a
 ### Worker dies during delivery
 
 Expired leases return safe internal work to pending. External sends are marked Unknown and require provider reconciliation. No process can atomically commit to PostgreSQL and an independent SMS or OTA provider; the application preserves uncertainty instead of declaring success or blindly duplicating a message. Record provider evidence when confirming delivery or explicitly retrying. A calendar check interrupted mid-run cannot commit after its lease expires; the next tick repeats it.
+
+### A property was removed
+
+Only the workspace owner can remove a property, after typing its name. Removal changes nothing on any platform. It pauses the property's calendar links (they are not fetched, and their export links answer 404 rather than an empty calendar), cancels cleaning work that has not begun, holds unsent replies as drafts, and hides the property everywhere. It waits while a cleaning started in the last 12 hours is under way. History is kept; nothing is deleted.
+
+If it was a mistake, the owner restores it from Properties → Removed properties. Only the links the removal paused come back on (a link the host had switched off stays off), they are checked straight away, and upcoming stays get new cleaning jobs that need a cleaner; cancelled jobs stay cancelled, and their cleaners were told when cleaning automation was on. The removed list shows any platform still requesting a paused link; remove the link in that platform's calendar settings. Removal is not erasure: there is no subject-erasure workflow yet (see [Observability and retention](#observability-and-retention)).
 
 ### User loses a password
 
