@@ -7,10 +7,12 @@
 // rather than serve an empty calendar, so removing a property here can never
 // open up dates on a platform; the host removes the links there when ready.
 //
-// History is kept, as everywhere in this app (no hard deletes: the runtime
-// role cannot delete calendar or cleaning history), which is also what makes
-// restoring possible. Restoring turns back on exactly the calendar links the
-// removal paused; links the host had switched off stay off.
+// History is kept for 30 days, which is what makes restoring possible
+// (routine work never hard-deletes: the runtime role cannot delete calendar
+// or cleaning history). Restoring turns back on exactly the calendar links
+// the removal paused; links the host had switched off stay off. After 30
+// days, or sooner if the owner asks, the property is deleted permanently
+// (see erasure.ts).
 import type { CleaningTask } from "@prisma/client";
 import { audit } from "../audit";
 import { reconcileListingTurnovers } from "../calendar/actions";
@@ -23,6 +25,7 @@ import { fromLocalDate } from "../calendar/mappers";
 import { lock, type Context, type Tx } from "../db";
 import { ensure } from "../errors";
 import { closeTask } from "./cleaning";
+import { erasesAt } from "./erasure";
 import { capabilityOf } from "@/domain/calendar/capabilities";
 import { todayIn } from "@/domain/calendar/dates";
 import type { Platform } from "@/domain/calendar/types";
@@ -181,6 +184,8 @@ async function ensureNoCleaningUnderWay(
 export type RemovalResult = {
   id: string;
   removedAt: string;
+  /** When it is deleted permanently unless restored first. */
+  erasesAt: string;
   linksPaused: number;
   cleaningsCancelled: number;
   repliesHeld: number;
@@ -206,6 +211,7 @@ export async function removeProperty(
     return {
       id: listing.id,
       removedAt: listing.archivedAt.toISOString(),
+      erasesAt: erasesAt(listing.archivedAt).toISOString(),
       linksPaused: 0,
       cleaningsCancelled: 0,
       repliesHeld: 0,
@@ -313,6 +319,7 @@ export async function removeProperty(
   const result: RemovalResult = {
     id: listing.id,
     removedAt: removed.archivedAt!.toISOString(),
+    erasesAt: erasesAt(removed.archivedAt!).toISOString(),
     linksPaused: paused.count,
     cleaningsCancelled,
     repliesHeld,
@@ -323,7 +330,7 @@ export async function removeProperty(
     "REMOVE",
     "Listing",
     listing.id,
-    "Host removed this property from the app. Nothing was changed on any platform; its export links stop answering until it is restored.",
+    "Host removed this property from the app. Nothing was changed on any platform; its export links stop answering until it is restored. Unless restored, it is deleted permanently after 30 days.",
     result,
   );
   return result;
@@ -424,6 +431,7 @@ export async function removedProperties(tx: Tx, ctx: Context) {
       name: l.name,
       address: l.address,
       removedAt: l.archivedAt!.toISOString(),
+      erasesAt: erasesAt(l.archivedAt!).toISOString(),
       // Requests for a paused link since the removal: a platform that still
       // imports it should have the link removed in its calendar settings.
       linksStillRequested: await linkUse(tx, ctx, connections, l.archivedAt!, [

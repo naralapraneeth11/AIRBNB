@@ -68,6 +68,7 @@ import {
   removedProperties,
   restoreProperty,
 } from "./services/properties";
+import { eraseProperty, erasurePreview } from "./services/erasure";
 import { operationsHealth } from "./routes/operations";
 import { createConnection } from "./calendar/actions";
 import { propertySettingsChanged } from "./calendar/commit";
@@ -522,6 +523,22 @@ export async function handle(request: NextRequest) {
         // next scheduled tick.
         kick(ctx.workspaceId);
         return json(result);
+      }
+      // Deleting a removed property permanently (services/erasure.ts): the
+      // owner only, with their password, a few attempts at a time.
+      if (method === "GET" && path[2] === "erasure" && path.length === 3)
+        return json(
+          await tenant(ctx, (tx) => erasurePreview(tx, ctx, path[1])),
+        );
+      if (method === "POST" && path[2] === "erase" && path.length === 3) {
+        await rateLimit("erase:" + ctx.actorId, 5, 900);
+        const input = z
+          .object({
+            confirmName: z.string().max(200),
+            password: z.string().min(1).max(512),
+          })
+          .parse(await body(request));
+        return json(await eraseProperty(ctx, V.id.parse(path[1]), input));
       }
       if (method === "GET" && path.length === 1)
         return json(

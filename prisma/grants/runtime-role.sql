@@ -41,6 +41,15 @@ TO :"runtime_role";
 -- Append-only history.
 GRANT SELECT, INSERT ON TABLE "AuditLog", "DomainEvent" TO :"runtime_role";
 
+-- Permanent deletion of a removed property (PRIV 02) goes through one
+-- database function, which checks the workspace and that the property was
+-- removed, and writes the ledger itself. The application may read the
+-- ledger and mark stored photos deleted, nothing more.
+REVOKE ALL ON FUNCTION erase_listing(TEXT, TEXT, TEXT) FROM :"runtime_role";
+GRANT EXECUTE ON FUNCTION erase_listing(TEXT, TEXT, TEXT) TO :"runtime_role";
+GRANT SELECT ON TABLE "Erasure" TO :"runtime_role";
+GRANT UPDATE ("pendingObjects") ON TABLE "Erasure" TO :"runtime_role";
+
 -- Scheduler coordination and tick records (ARCH 03, OPS 01).
 GRANT SELECT, UPDATE ON TABLE "SchedulerLease" TO :"runtime_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "SchedulerTick" TO :"runtime_role";

@@ -12,7 +12,7 @@ Each database records the environment it belongs to, and the application refuses
 
 AES-256-GCM encrypts guest identity and contact fields, message bodies, door codes, property manuals, cleaner phone numbers, calendar feed URLs, comparison snapshots, bridge credentials, push subscriptions, outbox payloads, and detailed audit snapshots. Workspace IDs are authenticated encryption context; identity records use a separate identity scope. Export-link tokens are stored only as hashes. Listing names, addresses, operational dates and statuses, and audit summaries are not encrypted columns; database, storage and provider access controls remain necessary.
 
-Guest reads and exports at the application boundary generate audit entries. Sensitive prompt snapshots require an explicit owner request. Audit logs and domain events are append-only under database triggers and runtime grants, and calendar and cleaning history cannot be deleted by routine work. This is not an externally signed, tamper-proof ledger against a database administrator.
+Guest reads and exports at the application boundary generate audit entries. Sensitive prompt snapshots require an explicit owner request. Audit logs and domain events are append-only under database triggers and runtime grants, and calendar and cleaning history cannot be deleted by routine work. The one path that deletes history is permanently deleting a removed property, through a single database function with its own checks (see [A property is deleted permanently](#a-property-is-deleted-permanently)); it never touches the audit log. This is not an externally signed, tamper-proof ledger against a database administrator.
 
 ## How the calendar protects dates
 
@@ -42,7 +42,8 @@ Each export link is specific to one destination: it leaves out that destination'
 | Provider-accepted message/SMS | Cannot be recalled; investigate and send a human correction if needed                                                                           |
 | External reservation          | Resolve with the platform and guest, then record the confirmed outcome in this application                                                      |
 | Door code already revealed    | Access can be revoked in the application, but knowledge cannot be recalled; rotate the physical lock's code separately                          |
-| Removed property              | Restore it from Properties → Removed properties; its paused calendar links resume and upcoming stays get new, unassigned cleaning jobs          |
+| Removed property              | Restore it from Properties → Removed properties within 30 days; its paused calendar links resume and upcoming stays get new cleaning jobs       |
+| Permanently deleted property  | Cannot be undone. A backup restore brings it back only until the deletion is applied again with `pnpm erasures:reapply`                         |
 
 The app controls code disclosure, not physical smart-lock provisioning. It never cancels an OTA booking. Global pause is checked again before dispatch but cannot retract a network request already handed to a provider. Calendar checks and operational alerts continue while guest and cleaning automation is paused.
 
@@ -112,9 +113,23 @@ Expired leases return safe internal work to pending. External sends are marked U
 
 ### A property was removed
 
-Only the workspace owner can remove a property, after typing its name. Removal changes nothing on any platform. It pauses the property's calendar links (they are not fetched, and their export links answer 404 rather than an empty calendar), cancels cleaning work that has not begun, holds unsent replies as drafts, and hides the property everywhere. It waits while a cleaning started in the last 12 hours is under way. History is kept; nothing is deleted.
+Only the workspace owner can remove a property, after typing its name. Removal changes nothing on any platform. It pauses the property's calendar links (they are not fetched, and their export links answer 404 rather than an empty calendar), cancels cleaning work that has not begun, holds unsent replies as drafts, and hides the property everywhere. It waits while a cleaning started in the last 12 hours is under way. History is kept for 30 days; then the property is deleted permanently (next section).
 
-If it was a mistake, the owner restores it from Properties → Removed properties. Only the links the removal paused come back on (a link the host had switched off stays off), they are checked straight away, and upcoming stays get new cleaning jobs that need a cleaner; cancelled jobs stay cancelled, and their cleaners were told when cleaning automation was on. The removed list shows any platform still requesting a paused link; remove the link in that platform's calendar settings. Removal is not erasure: there is no subject-erasure workflow yet (see [Observability and retention](#observability-and-retention)).
+If it was a mistake, the owner restores it from Properties → Removed properties within those 30 days. Only the links the removal paused come back on (a link the host had switched off stays off), they are checked straight away, and upcoming stays get new cleaning jobs that need a cleaner; cancelled jobs stay cancelled, and their cleaners were told when cleaning automation was on. The removed list shows any platform still requesting a paused link, and the date each property will be deleted; remove the link in that platform's calendar settings.
+
+### A property is deleted permanently
+
+A removed property is deleted permanently 30 days after its removal, by the scheduler, or sooner when the owner chooses **Delete now…** in Properties → Removed properties and confirms with the property's name and their password (five attempts per 15 minutes). A property still in the app cannot be deleted; remove it first. Nothing is sent to any platform.
+
+Everything stored for the property is deleted in one transaction: its stays with guest names, contacts and prices; conversations and messages; cleaning jobs, notes and cleaner links; photos; calendar links with their check history, export versions and retrievals; property-specific rules; and the alerts and queued work about any of it. Cleaners stay on the team with the property taken off their list, and guided setup that pointed at it starts again from choosing a property. Photos are then deleted from storage; any photo that storage does not confirm as deleted stays listed and is retried every scheduler tick (the log line `erasure_photos_pending` counts them). The deletion refuses, and changes nothing, while a message about the property is being handed to a provider; it succeeds a minute later.
+
+The deletion goes through the database function `erase_listing`, the only way the runtime role can delete calendar or cleaning history: it acts only inside the caller's workspace and only on a removed property. Each deletion is recorded in the `Erasure` ledger with ids, counts, trigger (`OWNER`, `RETENTION` or `REAPPLIED`) and actor, and nothing that identifies a guest or the property; the audit log gains an `ERASE` entry. What remains after a deletion:
+
+- **Audit log and domain events.** They are append-only and are not edited. Earlier entries about the property stay; their reasons are generic, and details they recorded (an earlier version of the property's settings, an AI draft's prompt, an overlap note) stay encrypted. Domain events hold ids and statuses only.
+- **Backups** made before the deletion, until they expire. Set a lifecycle rule on the backup bucket (see [Backups and restore](#backups-and-restore)).
+- **Logs and providers.** Request logs carry ids only. Messages already delivered to a guest, a cleaner or a messaging bridge are outside this application.
+
+After restoring a backup, apply deletions made since that backup again: see [Backups and restore](#backups-and-restore). An administrator (a role that bypasses row-level security) lists photos still waiting with `SELECT "workspaceId", "subjectId", cardinality("pendingObjects") FROM "Erasure" WHERE cardinality("pendingObjects") > 0;`.
 
 ### User loses a password
 
@@ -163,6 +178,17 @@ pg_restore --no-owner --no-privileges --dbname "$RESTORE_URL" restore.dump
 
 Then apply `prisma/grants/runtime-role.sql` and mark the restored database with its own environment. For photos, decrypt `storage-manifest-<stamp>.json.enc`, then decrypt each `objects/<sha256>.enc` and upload it to its `storageKey` in the restored environment's private bucket. Configure the escrowed keys last. Reimporting calendar feeds cannot recover holds, decisions, assignments, drafts, audit history or photos; only the backup can.
 
+**Deletions made after the backup** (PRIV 02). A restored backup still holds every property deleted after it was taken. Before serving the restored data, apply those deletions again. While the database being replaced is readable, export its ledger with the application's `DATABASE_URL`; otherwise collect the `property_erased` log lines written since the backup (one JSON object per line, ids only):
+
+```sh
+pnpm erasures:export erasures.json        # against the database being replaced
+pnpm erasures:reapply erasures.json       # against the restored database
+```
+
+Each property the restored data still holds is taken out of the app and deleted again, recorded as `REAPPLIED`; one it no longer holds is skipped, so the command is safe to repeat. It deletes the photos it finds in the database, so run it after uploading the restored photos.
+
+**Backup lifetime.** Deleted data stays in backups made before the deletion until those artifacts are deleted. Set a lifecycle rule on the backup bucket that expires artifacts after a fixed period (for example 35 days, beyond the 30-day removal window) and state that period in your privacy notice.
+
 **Drill.** Before relying on backups, restore the latest artifacts into an isolated environment, time it, compare row counts, open a photo, decrypt one record, and record the result in [RELEASE_GATES.md](RELEASE_GATES.md#backups-and-restore-drill). The proposed beta objectives (24-hour recovery point, 4-hour recovery time) need that drill and owner acceptance (D09).
 
 ## Keys
@@ -194,8 +220,9 @@ Bounded retention (DATA 03), enforced by the scheduler:
 | Revoked export tokens    | 90 days, to count stale-link hits                                                                     |
 | Scheduler ticks          | 14 days                                                                                               |
 | Sessions and rate limits | Until expiry                                                                                          |
+| Removed properties       | 30 days after removal, then deleted permanently with their photos (PRIV 02)                           |
 
-Raw feed bodies and event descriptions are never stored. There is no broad guest-data retention policy, audit deletion, photo lifecycle deletion or subject-erasure workflow yet. Define those before storing regulated production data; append-only audit tables intentionally cannot be deleted by the runtime role.
+Raw feed bodies and event descriptions are never stored. A property can be deleted permanently, with everything stored for it (see [A property is deleted permanently](#a-property-is-deleted-permanently)). There is not yet a retention period for the history of properties still in use, deletion of a single guest's data, account or workspace deletion, or audit-log retention. Define those before storing regulated production data; append-only audit tables intentionally cannot be deleted by the runtime role.
 
 ## Capacity and validation limits
 

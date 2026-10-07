@@ -246,8 +246,25 @@ export type RemovedProperty = {
   name: string;
   address: string;
   removedAt: string;
+  /** When it is deleted permanently unless restored first. */
+  erasesAt: string;
   /** Requests for its paused links since it was removed. */
   linksStillRequested: { name: string; lastAt: string }[];
+};
+/** What deleting a removed property would delete (GET listings/:id/erasure). */
+export type ErasurePreview = {
+  id: string;
+  name: string;
+  removedAt: string;
+  erasesAt: string;
+  stays: number;
+  conversations: number;
+  messages: number;
+  cleanings: number;
+  photos: number;
+  calendarLinks: number;
+  /** Cleaners who stay on the team, with this property taken off their list. */
+  cleaners: number;
 };
 /** Messages oldest first; `hasOlder` says whether earlier ones remain. */
 export type MessagePage = { messages: Message[]; hasOlder: boolean };

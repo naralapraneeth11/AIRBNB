@@ -320,6 +320,26 @@ model AuditLog {
   @@index([workspaceId, entityId])
 }
 
+/// PRIV 02: one row per permanently deleted property, written only by the
+/// erase_listing database function. Ids, counts and the stored photos still
+/// to delete; never a name, address, date or guest detail.
+model Erasure {
+  id             String   @id
+  workspaceId    String
+  subject        String
+  subjectId      String
+  /// OWNER (deleted by the owner), RETENTION (30 days after removal) or
+  /// REAPPLIED (deleted again after a backup restore).
+  trigger        String
+  actorId        String
+  counts         Json
+  pendingObjects String[] @default([])
+  erasedAt       DateTime @default(now())
+
+  @@unique([workspaceId, subject, subjectId])
+  @@index([workspaceId, erasedAt])
+}
+
 model Notification {
   id          String    @id @default(cuid())
   workspaceId String

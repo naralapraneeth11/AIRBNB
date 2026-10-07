@@ -3724,6 +3724,15 @@ td {
   flex-shrink: 0;
   margin-top: 3px;
 }
+.removed-properties li small.removed-erases {
+  color: var(--danger);
+}
+.removed-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-shrink: 0;
+}
 @media (max-width: 540px) {
   .removed-properties li {
     flex-direction: column;

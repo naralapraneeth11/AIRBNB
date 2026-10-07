@@ -14,6 +14,27 @@ function headers() {
     apikey: required("SUPABASE_SERVICE_ROLE_KEY"),
   };
 }
+/**
+ * Delete a stored object for good (PRIV 02). True once storage confirms it
+ * is gone, including when it was already gone; false otherwise.
+ */
+export async function deleteStoredObject(key: string) {
+  const response = await fetch(url(key), {
+    method: "DELETE",
+    headers: headers(),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (response.ok || response.status === 404) return true;
+  // Storage can report a missing object as a 400 whose body says 404.
+  const detail = (await response.json().catch(() => null)) as {
+    statusCode?: string;
+    error?: string;
+  } | null;
+  return (
+    response.status === 400 &&
+    (detail?.statusCode === "404" || detail?.error === "not_found")
+  );
+}
 export async function uploadPhoto(
   ctx: Context,
   file: File,

@@ -10,6 +10,7 @@ import {
   Toggle,
   ErrorBox,
   Confirm,
+  Modal,
 } from "./ui";
 import {
   api,
@@ -30,6 +31,7 @@ import type {
   Job,
   RemovalPreview,
   RemovedProperty,
+  ErasurePreview,
 } from "@/lib/types";
 import {
   Plus,
@@ -430,8 +432,8 @@ function ListingDetail({ listing: initial }: { listing: Listing }) {
                 <h3>Remove from this app</h3>
                 <p>
                   Stops its calendar checks, export links and cleaning here.
-                  Nothing changes on Airbnb, Vrbo or any other platform, and you
-                  can restore it later.
+                  Nothing changes on Airbnb, Vrbo or any other platform. You can
+                  restore it for 30 days; after that it is deleted permanently.
                 </p>
               </div>
               <Button
@@ -531,6 +533,16 @@ function ListingDetail({ listing: initial }: { listing: Listing }) {
 const its = (n: number, one: string, many = one + "s") =>
   n === 1 ? `its ${one}` : `its ${n} ${many}`;
 const capital = (text: string) => text[0].toUpperCase() + text.slice(1);
+/** "November 6, 2026". */
+const longDay = (value: string) =>
+  new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(value));
+/** "1 stay", "3 stays". */
+const count = (n: number, one: string, many = one + "s") =>
+  `${n} ${n === 1 ? one : many}`;
 
 /**
  * Removing a property from the app. It says what stops and what does not
@@ -579,11 +591,13 @@ function RemoveProperty({ listing }: { listing: Listing }) {
     setBusy(true);
     setError("");
     try {
-      await mutate(`listings/${p.id}/remove`, {
-        confirmName: typed,
-        version: p.version,
-      });
-      toast(`${p.name} was removed. Restore it any time from Properties.`);
+      const result = await mutate<{ erasesAt: string }>(
+        `listings/${p.id}/remove`,
+        { confirmName: typed, version: p.version },
+      );
+      toast(
+        `${p.name} was removed. You can restore it from Properties until ${longDay(result.erasesAt)}.`,
+      );
       close();
     } catch (e) {
       setError((e as Error).message);
@@ -648,8 +662,9 @@ function RemoveProperty({ listing }: { listing: Listing }) {
           </li>
         )}
         <li>
-          Its history is kept, and you can restore it from Properties at any
-          time.
+          Its history is kept for 30 days, so you can restore it from
+          Properties. After that, everything this app stores about it is deleted
+          permanently.
         </li>
       </ul>
       {p.linksInUse.length > 0 && (
@@ -706,13 +721,17 @@ function RemoveProperty({ listing }: { listing: Listing }) {
   );
 }
 
-/** Removed properties, kept so they can be restored (owner only). */
+/**
+ * Removed properties, kept for 30 days so they can be restored, then deleted
+ * permanently. Only the owner restores or deletes.
+ */
 function RemovedProperties() {
   const { data, mutate, toast } = useWorkspace();
   const now = useNow();
   const [rows, setRows] = useState<RemovedProperty[]>([]),
     [error, setError] = useState(""),
     [restoring, setRestoring] = useState<RemovedProperty | null>(null),
+    [erasing, setErasing] = useState<RemovedProperty | null>(null),
     [busy, setBusy] = useState(false);
   const owner = data.user.role === "HOST";
   const load = useCallback(
@@ -745,47 +764,62 @@ function RemovedProperties() {
     }
   }
   if (!rows.length) return error ? <ErrorBox message={error} /> : null;
+  // The dialogs sit beside the panel, not in it, so the list's row styles
+  // never reach them.
   return (
-    <details className="panel removed-properties">
-      <summary>
-        Removed properties <Badge>{rows.length}</Badge>
-      </summary>
-      <p className="microcopy">
-        Out of the app: no calendar checks, export links or cleaning. Their
-        history is kept, so they can be restored.
-      </p>
-      {error && <ErrorBox message={error} />}
-      <ul>
-        {rows.map((r) => (
-          <li key={r.id}>
-            <div>
-              <strong>{r.name}</strong>
-              <small>
-                {r.address} · Removed {dateTime(r.removedAt)}
-              </small>
-              {r.linksStillRequested.length > 0 && (
-                <p className="removed-warning">
-                  <Info size={14} aria-hidden="true" />
-                  <span>
-                    Still asked for its calendar link:{" "}
-                    {r.linksStillRequested
-                      .map((l) => `${l.name} (${ago(l.lastAt, now)})`)
-                      .join(", ")}
-                    . Remove the link in that platform&rsquo;s calendar
-                    settings.
-                  </span>
-                </p>
+    <>
+      <details className="panel removed-properties">
+        <summary>
+          Removed properties <Badge>{rows.length}</Badge>
+        </summary>
+        <p className="microcopy">
+          Out of the app: no calendar checks, export links or cleaning. Each is
+          kept for 30 days so it can be restored, then deleted permanently.
+        </p>
+        {error && <ErrorBox message={error} />}
+        <ul>
+          {rows.map((r) => (
+            <li key={r.id}>
+              <div>
+                <strong>{r.name}</strong>
+                <small>
+                  {r.address} · Removed {dateTime(r.removedAt)}
+                </small>
+                <small className="removed-erases">
+                  {Date.parse(r.erasesAt) > now
+                    ? `Deleted permanently on ${longDay(r.erasesAt)}`
+                    : "Being deleted permanently"}
+                </small>
+                {r.linksStillRequested.length > 0 && (
+                  <p className="removed-warning">
+                    <Info size={14} aria-hidden="true" />
+                    <span>
+                      Still asked for its calendar link:{" "}
+                      {r.linksStillRequested
+                        .map((l) => `${l.name} (${ago(l.lastAt, now)})`)
+                        .join(", ")}
+                      . Remove the link in that platform&rsquo;s calendar
+                      settings.
+                    </span>
+                  </p>
+                )}
+              </div>
+              {owner && (
+                <div className="removed-actions">
+                  <Button onClick={() => setRestoring(r)}>
+                    <RotateCcw size={15} />
+                    Restore
+                  </Button>
+                  <Button className="danger" onClick={() => setErasing(r)}>
+                    <Trash2 size={15} />
+                    Delete now…
+                  </Button>
+                </div>
               )}
-            </div>
-            {owner && (
-              <Button onClick={() => setRestoring(r)}>
-                <RotateCcw size={15} />
-                Restore
-              </Button>
-            )}
-          </li>
-        ))}
-      </ul>
+            </li>
+          ))}
+        </ul>
+      </details>
       {restoring && (
         <Confirm
           title={`Restore ${restoring.name}?`}
@@ -796,7 +830,201 @@ function RemovedProperties() {
           onClose={() => setRestoring(null)}
         />
       )}
-    </details>
+      {erasing && (
+        <Modal
+          title={`Delete ${erasing.name} permanently?`}
+          onClose={() => setErasing(null)}
+        >
+          <EraseProperty
+            property={erasing}
+            onClose={() => setErasing(null)}
+            onErased={async () => {
+              setErasing(null);
+              await load();
+            }}
+          />
+        </Modal>
+      )}
+    </>
+  );
+}
+
+/**
+ * Deleting a removed property permanently. It says what is deleted and what
+ * is not before anything happens, and asks for the property's name and the
+ * owner's password.
+ */
+function EraseProperty({
+  property,
+  onClose,
+  onErased,
+}: {
+  property: RemovedProperty;
+  onClose: () => void;
+  onErased: () => void;
+}) {
+  const { mutate, toast } = useWorkspace();
+  const [preview, setPreview] = useState<ErasurePreview | null>(null),
+    [error, setError] = useState(""),
+    [typed, setTyped] = useState(""),
+    [password, setPassword] = useState(""),
+    [busy, setBusy] = useState(false),
+    [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let active = true;
+    api<ErasurePreview>(`listings/${property.id}/erasure`)
+      .then((p) => {
+        if (active) setPreview(p);
+      })
+      .catch((e) => {
+        if (active) setError((e as Error).message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [property.id, attempt]);
+  if (!preview)
+    return error ? (
+      <ErrorBox
+        message={error}
+        retry={() => {
+          setError("");
+          setAttempt((n) => n + 1);
+        }}
+      />
+    ) : (
+      <p className="microcopy" role="status">
+        Checking what is stored for this property…
+      </p>
+    );
+  const p = preview;
+  const confirmed = sameName(typed, p.name) && password.length > 0;
+  async function erase() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await mutate<{ photosPending: number }>(
+        `listings/${p.id}/erase`,
+        { confirmName: typed, password },
+      );
+      toast(
+        result.photosPending
+          ? `${p.name} was deleted permanently. ${count(result.photosPending, "photo")} will be removed from storage shortly.`
+          : `${p.name} was deleted permanently.`,
+      );
+      onErased();
+    } catch (e) {
+      setError((e as Error).message);
+      setPassword("");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <form
+      className="removal"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (confirmed && !busy) erase();
+      }}
+    >
+      <p className="removal-lead">
+        This deletes everything this app stores about <strong>{p.name}</strong>.
+        It cannot be undone, and the property cannot be restored afterwards.
+      </p>
+      <h3>Deleted for good</h3>
+      <ul className="removal-list">
+        {p.stays > 0 && (
+          <li>
+            {capital(count(p.stays, "stay"))}, with guest names, contact details
+            and prices.
+          </li>
+        )}
+        {p.conversations > 0 && (
+          <li>
+            {capital(count(p.conversations, "guest conversation"))} (
+            {count(p.messages, "message")}).
+          </li>
+        )}
+        {p.cleanings > 0 && (
+          <li>
+            {capital(count(p.cleanings, "cleaning job"))} and their notes
+            {p.photos > 0 ? `, and ${count(p.photos, "photo")}` : ""}.
+          </li>
+        )}
+        {p.cleanings === 0 && p.photos > 0 && (
+          <li>{capital(count(p.photos, "photo"))}.</li>
+        )}
+        {p.calendarLinks > 0 && (
+          <li>
+            {capital(its(p.calendarLinks, "calendar link"))} and{" "}
+            {p.calendarLinks === 1 ? "its" : "their"} check history.
+          </li>
+        )}
+        <li>Its address, house manual, door code, rules and alerts.</li>
+      </ul>
+      <h3>Not affected</h3>
+      <ul className="removal-list">
+        <li>
+          Nothing changes on Airbnb, Vrbo or any other platform. If a platform
+          still imports its calendar link, remove the link there.
+        </li>
+        {p.cleaners > 0 && (
+          <li>
+            {p.cleaners === 1
+              ? "Its cleaner stays on your team"
+              : `Its ${p.cleaners} cleaners stay on your team`}
+            ; this property is taken off their list.
+          </li>
+        )}
+        <li>
+          Your activity log is never edited. Its entries about this property
+          stay, and the details they recorded remain encrypted.
+        </li>
+        <li>
+          Encrypted backups made before now keep a copy until they expire.
+        </li>
+      </ul>
+      <Field
+        label={`Type “${p.name}” to confirm`}
+        hint="Capital letters do not matter."
+      >
+        <input
+          name="confirmName"
+          value={typed}
+          onChange={(e) => setTyped(e.target.value)}
+          autoComplete="off"
+          spellCheck={false}
+          autoCapitalize="off"
+        />
+      </Field>
+      <Field
+        label="Your password"
+        hint="Deleting for good asks for your password, even while you are signed in."
+      >
+        <input
+          name="password"
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoComplete="current-password"
+        />
+      </Field>
+      {error && <ErrorBox message={error} />}
+      <div className="form-actions">
+        <Button type="button" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button
+          type="submit"
+          className="danger solid"
+          disabled={!confirmed || busy}
+        >
+          <Trash2 size={15} />
+          {busy ? "Deleting…" : "Delete permanently"}
+        </Button>
+      </div>
+    </form>
   );
 }
 

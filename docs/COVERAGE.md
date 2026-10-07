@@ -54,6 +54,6 @@ The repository includes domain, fixture, property-based, encryption and PGlite d
 
 No production credentials were supplied with the request. Live OTA accounts, a deployed partner bridge, SMS delivery, inbound/direct email, browser push delivery, private cloud storage, and hosted OpenAI calls need operator-connected acceptance checks. UI and unit/database checks are not substitutes for those checks.
 
-The release also lacks MFA/SSO, self-service email password recovery, automatic PII-retention/erasure tooling, bulk key re-encryption, a public booking/payment checkout, provider delivery-status callbacks, and smart-lock programming. These are not silently simulated. The specified foundation can be extended through the server services and versioned migrations; future changes still require schema, privacy, UX, and performance review.
+The release also lacks MFA/SSO, PII retention periods and erasure beyond permanently deleting a removed property (no per-guest or account deletion), bulk key re-encryption, a public booking/payment checkout, provider delivery-status callbacks, and smart-lock programming. These are not silently simulated. The specified foundation can be extended through the server services and versioned migrations; future changes still require schema, privacy, UX, and performance review.
 
 See [DEPLOYMENT.md](DEPLOYMENT.md), [INTEGRATIONS.md](INTEGRATIONS.md), and [OPERATIONS.md](OPERATIONS.md) for concrete setup and operational boundaries.

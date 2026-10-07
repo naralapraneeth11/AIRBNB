@@ -4,6 +4,36 @@ A check counts as passed only when it ran (QA 03). This file records runs, not
 intentions; gate status and remaining operator work are in
 [RELEASE_GATES.md](RELEASE_GATES.md).
 
+## Deleting a property permanently: October 7, 2026 (later)
+
+Run locally against the working tree of the commit that adds this entry.
+Same environment as below.
+
+| Gate (CI order)                  | Result                                                                                                                                                                                                                                                                      |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm install --frozen-lockfile` | Passed (no dependency changes)                                                                                                                                                                                                                                              |
+| `pnpm typecheck`                 | Passed                                                                                                                                                                                                                                                                      |
+| `pnpm lint`                      | Passed: 0 errors, the same 16 warnings                                                                                                                                                                                                                                      |
+| `pnpm format:check`              | Passed                                                                                                                                                                                                                                                                      |
+| `pnpm test`                      | 104 passed, 0 failed, 0 skipped (adds the restore-file records and the 30-day date)                                                                                                                                                                                         |
+| `pnpm test:integration`          | 45 passed, 0 failed, 0 skipped (adds the owner, password, name and removal guards; everything deleted and nothing else; the audit log untouched; photos retried; the 30-day scheduler; a send in flight; the database's own checks and grants; re-applying after a restore) |
+| `pnpm build`                     | Passed                                                                                                                                                                                                                                                                      |
+| `pnpm test:browser`              | 32 passed, 0 failed, 0 skipped (adds the deletion date, the delete dialog with its name and password, a wrong password, phone width, and the export link answering 404 afterwards)                                                                                          |
+| `pnpm audit:deps`                | Passed: the same two recorded exceptions                                                                                                                                                                                                                                    |
+
+Three deletion checks were confirmed to fail with their protection taken
+out: without the password check, a wrong password deleted the property;
+without the database function's removal check, it deleted a property still
+in the app; without deleting alerts, alerts naming the property survived
+(in both the owner's deletion and a re-applied one). The new screens were
+reviewed by eye at desktop and phone widths, which led to one fix (the
+removed list's row styles reached the dialog's lists, so the dialogs now
+sit outside that panel).
+
+Not verified here: deleting real objects from Supabase Storage (the checks
+answer storage requests locally, including an outage), a restore drill that
+re-applies deletions to a real backup, and the hosted deployment.
+
 ## Removing a property, and security updates: October 7, 2026
 
 Run locally against the working tree of the commit that adds this entry, on

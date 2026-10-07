@@ -4,7 +4,59 @@ Notable changes, newest first. Requirement identifiers refer to the Hostsphere
 Product and Engineering Specification v1.1. Gate evidence lives in
 [docs/RELEASE_GATES.md](docs/RELEASE_GATES.md).
 
-## Unreleased: removing a property, and security updates
+## Unreleased: deleting a property permanently
+
+### Before you upgrade
+
+- **Migration.** Apply `202610070002_erasure` (`pnpm db:migrate`) before
+  deploying the code, then re-run `prisma/grants/runtime-role.sql` as after
+  every migration. It only adds a table and a database function, so the
+  previous release keeps working.
+- **Backups.** Re-run `prisma/grants/backup-role.sql` as an administrator.
+  The backup role can read only the tables that existed when it last ran,
+  and the nightly Postgres backup fails on a table it cannot read (this
+  release adds `Erasure`; `202609280001_accounts` added three). Then give
+  the backup bucket a lifecycle rule that expires artifacts after a fixed
+  period, so deleted properties also leave the backups.
+- **Removed properties are now deleted after 30 days.** A property removed
+  with the previous release is deleted permanently 30 days after its
+  removal unless it is restored first.
+
+### Added
+
+- **Delete a removed property permanently** (PRIV 02, owner only): **Delete
+  now…** in Properties → Removed properties. The dialog says what is deleted
+  and what is not, and the button stays disabled until the property's name
+  and the owner's password are entered; a wrong password deletes nothing
+  (five attempts per 15 minutes). A property still in the app cannot be
+  deleted, and nothing is sent to any platform.
+- **Automatic deletion 30 days after removal**, by the scheduler. The
+  removed list shows each property's date, and the remove dialog and its
+  confirmation say so.
+- Everything stored for the property is deleted in one transaction: stays
+  with guest names, contacts and prices; conversations; cleaning jobs,
+  notes and cleaner links; photos (in storage too, retried until storage
+  confirms); calendar links with their check history and export versions;
+  property-specific rules; and the alerts and queued work about any of it.
+  Cleaners stay on the team, with the property taken off their list. It
+  waits while a message about the property is being sent.
+- **A deletion ledger** that records each deletion with ids, counts,
+  trigger and actor, and nothing that identifies a guest or the property.
+  The runtime role can delete history only through the one database
+  function that writes it, which acts only inside the caller's workspace
+  and only on a removed property.
+- **Deletions survive a backup restore**: `pnpm erasures:export` and
+  `pnpm erasures:reapply`, which also reads the `property_erased` log lines
+  written since a backup. The runbook is in
+  [docs/OPERATIONS.md](docs/OPERATIONS.md#backups-and-restore).
+
+### Not changed
+
+- The audit log and domain events stay append-only; nothing edits them.
+  Entries about a deleted property remain, with generic reasons, and any
+  details they recorded stay encrypted. The dialog says so.
+
+## Removing a property, and security updates ([#4](https://github.com/naralapraneeth11/AIRBNB/pull/4))
 
 ### Before you upgrade
 

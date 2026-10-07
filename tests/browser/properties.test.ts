@@ -1,9 +1,10 @@
-// Browser checks for removing a property from the app and restoring it
-// (QA 03), against the production build and real PostgreSQL: the dialog says
-// what will stop and what will not, the button stays disabled until the
-// property's name is typed, the property then leaves every screen, its
-// export link stops answering without serving an empty calendar, and
-// restoring brings it back.
+// Browser checks for removing a property from the app, restoring it, and
+// deleting it permanently (QA 03), against the production build and real
+// PostgreSQL: the dialog says what will stop and what will not, the button
+// stays disabled until the property's name is typed, the property then
+// leaves every screen, its export link stops answering without serving an
+// empty calendar, and restoring brings it back. Deleting for good also needs
+// the owner's password, refuses a wrong one, and leaves nothing to restore.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { after, before, test } from "node:test";
@@ -254,6 +255,95 @@ test("the remove dialog reflows at phone width", { skip }, async () => {
     await phone.close();
   }
 });
+
+test(
+  "a removed property can be deleted permanently with its name and the owner's password",
+  { skip },
+  async () => {
+    // It was restored above: remove it again.
+    await page.goto(`${base}/properties`);
+    await card(GONE).click();
+    await dialog().getByRole("button", { name: "Remove property…" }).click();
+    await dialog()
+      .getByText(/history is kept for 30 days/)
+      .waitFor();
+    await dialog().getByLabel(`Type “${GONE}” to confirm`).fill(GONE);
+    await dialog().getByRole("button", { name: "Remove property" }).click();
+    await page
+      .getByText(
+        `${GONE} was removed. You can restore it from Properties until`,
+      )
+      .waitFor();
+    const removed = page.locator(".removed-properties");
+    await removed.getByText("Removed properties").click();
+    await removed.getByText(/Deleted permanently on /).waitFor();
+
+    // The dialog reflows at phone width too.
+    const phone = await browser!.newContext({
+      viewport: { width: 390, height: 844 },
+      storageState: await desktop!.storageState(),
+      timezoneId: "UTC",
+      locale: "en-US",
+    });
+    try {
+      const small = await phone.newPage();
+      watch(small);
+      await small.goto(`${base}/properties`);
+      const list = small.locator(".removed-properties");
+      await list.getByText("Removed properties").click();
+      await list.getByRole("button", { name: "Delete now…" }).click();
+      await small.locator("dialog[open]").getByLabel("Your password").waitFor();
+      const widths = await small.evaluate(() => ({
+        page: document.documentElement.scrollWidth,
+        viewport: window.innerWidth,
+      }));
+      assert.ok(widths.page <= widths.viewport, "no sideways scrolling");
+    } finally {
+      await phone.close();
+    }
+
+    await removed.getByRole("button", { name: "Delete now…" }).click();
+    const form = dialog();
+    await form
+      .getByRole("heading", { name: `Delete ${GONE} permanently?` })
+      .waitFor();
+    await form.getByText(/It cannot be undone/).waitFor();
+    await form.getByText(/calendar link and its check history/).waitFor();
+    await form.getByText(/Nothing changes on Airbnb/).waitFor();
+    await form.getByText(/activity log is never edited/).waitFor();
+
+    const erase = form.getByRole("button", { name: "Delete permanently" });
+    assert.equal(await erase.isDisabled(), true, "disabled until confirmed");
+    await form.getByLabel(`Type “${GONE}” to confirm`).fill(GONE.toUpperCase());
+    assert.equal(await erase.isDisabled(), true, "the password is needed too");
+    await form.getByLabel("Your password").fill("not-the-password");
+    assert.equal(await erase.isDisabled(), false);
+
+    // A wrong password deletes nothing and says so. That refusal is the
+    // one failed request expected here; anything else is still reported.
+    const seen = problems.length;
+    await erase.click();
+    await form
+      .getByText("That password is not right. Nothing was deleted.")
+      .waitFor();
+    const refusals = problems.splice(seen);
+    assert.ok(
+      refusals.length > 0 && refusals.every((p) => /403|\/erase/.test(p)),
+      refusals.join("\n"),
+    );
+    assert.equal(await form.getByLabel("Your password").inputValue(), "");
+
+    await form.getByLabel("Your password").fill(PASSWORD);
+    await erase.click();
+    await page.getByText(`${GONE} was deleted permanently.`).waitFor();
+    await removed.waitFor({ state: "detached" });
+    await card(KEPT).waitFor();
+    assert.equal(await card(GONE).count(), 0);
+    const response = await page.request.get(exportUrl);
+    assert.equal(response.status(), 404);
+    assert.equal(await response.text(), "Calendar not found.");
+  },
+);
 
 test("no unexpected browser errors or failed requests", { skip }, async () => {
   assert.deepEqual(problems, []);

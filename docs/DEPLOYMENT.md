@@ -26,7 +26,7 @@ With the schema owner as `DIRECT_URL`, apply the migrations:
 pnpm db:migrate
 ```
 
-This applies, in order, `202609210001_initial`, `202609210002_security` (forced RLS, tenant-aware foreign keys, workflow checks, immutable-history triggers), `202609270001_operations_foundation` (scheduler lease and ticks, environment marker, backup evidence), `202609270002_calendar_correctness` (the Phase 1 calendar model) `202609280001_accounts` (pending sign-ups, password reset links and guided setup progress; additive only, so it is safe to run before or after the code that uses it) and `202610070001_property_removal` (a calendar-link state for links paused by removing their property; constraint changes only, safe in either order: until it runs, removing a property fails and changes nothing). Do not substitute `prisma db push`; it does not install the custom SQL protections.
+This applies, in order, `202609210001_initial`, `202609210002_security` (forced RLS, tenant-aware foreign keys, workflow checks, immutable-history triggers), `202609270001_operations_foundation` (scheduler lease and ticks, environment marker, backup evidence), `202609270002_calendar_correctness` (the Phase 1 calendar model) `202609280001_accounts` (pending sign-ups, password reset links and guided setup progress; additive only, so it is safe to run before or after the code that uses it) `202610070001_property_removal` (a calendar-link state for links paused by removing their property; constraint changes only, safe in either order: until it runs, removing a property fails and changes nothing) and `202610070002_erasure` (the `Erasure` ledger and `erase_listing`, the one database function that may delete a removed property's history; additive, so the previous release is unaffected, but run it before the code that calls it). Do not substitute `prisma db push`; it does not install the custom SQL protections.
 
 `202609270002_calendar_correctness` rebuilds the calendar model under the MIG 01 pre-launch exception. On a database that already exists, run it only after the product owner's written confirmation that no real host data exists and a verified backup, recorded in [RELEASE_GATES.md](RELEASE_GATES.md#mig-01-written-confirmation). `pnpm db:prelaunch-check` prints the row counts that confirmation relies on. The migration refuses to run over legacy calendar rows and keeps existing export links and cleaning tasks.
 
@@ -37,7 +37,7 @@ psql "$DIRECT_URL" -v ON_ERROR_STOP=1 -v runtime_role=airbnb_app \
   -f prisma/grants/runtime-role.sql
 ```
 
-The script is idempotent and revokes before it grants, so re-run it after every migration. It gives the runtime role only what the application uses: calendar and cleaning history without `DELETE`, append-only audit and domain events, update-only access to the scheduler lease, and read-only access to the environment marker and backup evidence. It never grants `_prisma_migrations`, ownership, schema creation, or default privileges on future tables.
+The script is idempotent and revokes before it grants, so re-run it after every migration. It gives the runtime role only what the application uses: calendar and cleaning history without `DELETE`, append-only audit and domain events, update-only access to the scheduler lease, read-only access to the environment marker and backup evidence, and `EXECUTE` on `erase_listing` with read access to its ledger (the only way the runtime role can delete a removed property's history). It never grants `_prisma_migrations`, ownership, schema creation, or default privileges on future tables.
 
 Mark the database with the environment it belongs to (SEC 04). Only the schema owner can write the marker:
 
@@ -95,6 +95,8 @@ The browser uploads to the application, never directly with the service key. Upl
 
 Photo upload failure keeps cleaning unverified. Validate a real upload and authenticated retrieval before assigning live jobs.
 
+Deleting a property permanently also deletes its photos from the bucket with the service key; any photo that storage does not confirm as deleted is retried by the scheduler until it is gone.
+
 ## 4. Vercel
 
 1. Import the repository as a Next.js project. Use Node.js 22 or 24, install with `pnpm install --frozen-lockfile`, and build with `pnpm build`.
@@ -126,6 +128,8 @@ Nightly backups of Postgres, storage objects and encryption keys run as three Gi
 psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -v backup_role=hostsphere_backup \
   -v database=airbnb -f prisma/grants/backup-role.sql
 ```
+
+The role can read only the tables that existed when the script last ran, and `pg_dump` fails on a table it cannot read. Re-run the script after every migration that adds a table (`202609280001_accounts` and `202610070002_erasure` both do). Give the backup bucket a lifecycle rule that expires artifacts after a fixed period, so permanently deleted properties also leave the backups ([OPERATIONS.md](OPERATIONS.md#backups-and-restore)).
 
 ## 8. Calendar go-live
 

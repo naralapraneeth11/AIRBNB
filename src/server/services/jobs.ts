@@ -32,6 +32,7 @@ import {
 import { fromLocalDate, toLocalDate } from "../calendar/mappers";
 import type webpush from "web-push";
 import { activeListingIds } from "./listings";
+import { eraseExpired } from "./erasure";
 
 /** A tick must finish inside the platform's 60 second function limit. */
 export const TICK_BUDGET_MS = 48_000;
@@ -806,6 +807,8 @@ export async function runTick(
         await alertOverdue(w.id, now);
         await refreshAgedExports(w.id, now, workspaceDeadline);
         await pruneEvidence(w.id, now);
+        // PRIV 02: properties removed 30 days ago are deleted for good.
+        await eraseExpired(w.id, now, workspaceDeadline);
       } catch (error) {
         stats.failed++;
         reportError(error, "scheduler-workspace");

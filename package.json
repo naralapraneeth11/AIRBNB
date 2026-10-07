@@ -28,6 +28,8 @@
     "fixtures:anonymize": "node --import tsx scripts/anonymize-feed.ts",
     "calendar:mode": "node --env-file-if-exists=.env --import tsx scripts/calendar-mode.ts",
     "calendar:shadow-report": "node --env-file-if-exists=.env --import tsx scripts/shadow-report.ts",
+    "erasures:export": "node --env-file-if-exists=.env --import tsx scripts/erasures.ts export",
+    "erasures:reapply": "node --env-file-if-exists=.env --import tsx scripts/erasures.ts reapply",
     "format": "prettier --write src scripts tests docs ops .github README.md CONTRIBUTING.md SECURITY.md CHANGELOG.md package.json next.config.ts eslint.config.mjs tsconfig.json vercel.json",
     "format:check": "prettier --check src scripts tests docs ops .github README.md CONTRIBUTING.md SECURITY.md CHANGELOG.md package.json next.config.ts eslint.config.mjs tsconfig.json vercel.json",
     "package": "python3 scripts/package.py",
